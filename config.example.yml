@@ -1,0 +1,53 @@
+proxy:
+  server: "http://rb-proxy-de.bosch.com:8080"
+  username: "${PROXY_USERNAME}"
+  password: "${PROXY_PASSWORD}"
+
+mcp:
+  jira:
+    command:
+      - uv
+      - run
+      - --project
+      - ../jira_mcp
+      - ../jira_mcp/jira_mcp.py
+    environment:
+      JIRA_SERVER: "${JIRA_SERVER}"
+      JIRA_PAT: "${JIRA_PAT}"
+      PROXY_USERNAME: "${PROXY_USERNAME}"
+      PROXY_PASSWORD: "${PROXY_PASSWORD}"
+
+  bitbucket:
+    command:
+      - uv
+      - run
+      - --project
+      - ../bitbucket_mcp
+      - ../bitbucket_mcp/bitbucket_mcp.py
+    environment:
+      BITBUCKET_PAT: "${BITBUCKET_PAT}"
+      PROXY_USERNAME: "${PROXY_USERNAME}"
+      PROXY_PASSWORD: "${PROXY_PASSWORD}"
+
+llm:
+  base_url: "${DEEP_REVIEW_OPENAI_BASE_URL}"
+  api_key: "${DEEP_REVIEW_OPENAI_API_KEY}"
+  model_id: "default-model"
+  parameters:
+    temperature: 0
+
+agents:
+  discovery:
+    use_proxy: true
+  architecture:
+    use_proxy: true
+    llm:
+      model_id: "architecture-model"
+      parameters:
+        temperature: 0
+  code_polish:
+    use_proxy: false
+    llm:
+      base_url: "http://127.0.0.1:8000/v1"
+      api_key: null
+      model_id: "local-model"
