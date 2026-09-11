@@ -240,6 +240,11 @@ def test_agent_invocations_own_distinct_direct_and_proxied_clients(
         "Starting workflow step: Review architecture and design (agent: architecture_expert)",
         "Starting workflow step: Review implementation-level correctness "
         "(agent: implementation_expert)",
+        "Finished workflow step: Review architecture and design (agent: architecture_expert)",
+        "Finished workflow step: Review implementation-level correctness "
+        "(agent: implementation_expert)",
+        "architecture_expert found 0 issues",
+        "implementation_expert found 0 issues",
     }
 
 

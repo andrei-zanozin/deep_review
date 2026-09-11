@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 from pathlib import Path
@@ -25,6 +26,8 @@ REVIEW_ROLES = (
     AgentRole.CODE_POLISH_EXPERT,
 )
 SEVERITY_RANK = {Severity.MINOR: 0, Severity.MAJOR: 1, Severity.CRITICAL: 2}
+
+LOGGER = logging.getLogger(__name__)
 
 
 def run_specialists(
@@ -126,6 +129,7 @@ def consolidate(
     agents: AgentRunner,
 ) -> list[CandidateFinding]:
     if not candidates:
+        LOGGER.info("consolidator: accepted issues: 0, rejected issues: 0 []")
         return []
     result = agents.consolidator(
         {
@@ -133,7 +137,22 @@ def consolidate(
             "existing_reviewer_comments": existing_comments,
         }
     )
-    return _validate_consolidation(candidates, result, bool(existing_comments))
+    consolidated = _validate_consolidation(candidates, result, bool(existing_comments))
+    LOGGER.info(
+        "consolidator: accepted issues: %d, rejected issues: %d %s",
+        len(consolidated),
+        len(candidates) - len(consolidated),
+        _severity_summary(consolidated),
+    )
+    return consolidated
+
+
+def _severity_summary(findings: list[CandidateFinding]) -> str:
+    counts = {severity: 0 for severity in Severity}
+    for candidate in findings:
+        counts[candidate.finding.severity] += 1
+    groups = [f"{severity.value}: {counts[severity]}" for severity in Severity if counts[severity]]
+    return f"[{' | '.join(groups)}]" if groups else "[]"
 
 
 def _validate_consolidation(

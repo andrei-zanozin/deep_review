@@ -59,6 +59,7 @@ def publish(
                 "add_pull_request_comment",
                 arguments,
             )
+    LOGGER.info("posted issues: %d", len(findings))
 
     needs_work = bool(findings) or fix_verifier_status == "Done"
     commands.bitbucket(
@@ -122,15 +123,6 @@ def _preflight(
         finding = candidate.finding
         exists = finding_location_exists(repository_root, target, finding)
         is_inline = exists and location_in_diff(changed_diff, finding)
-        LOGGER.info(
-            "preflighting finding location: id=%s, path=%s, line=%d, side=%s, "
-            "placement=%s",
-            candidate.id,
-            finding.path,
-            finding.line,
-            finding.side.value,
-            "inline" if is_inline else "general" if exists else "invalid",
-        )
         if not exists:
             invalid.append(candidate.id)
         inline.append(is_inline)

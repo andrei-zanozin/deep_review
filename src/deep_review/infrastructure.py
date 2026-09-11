@@ -199,6 +199,7 @@ class StrandsAgentRunner:
                     raise WorkflowError(f"{role.value} agent failed: {exc}") from exc
                 if result.structured_output is None:
                     raise WorkflowError(f"{role.value} agent returned no structured output")
+                _log_finished_step(role)
                 return result.structured_output
 
         return asyncio.run(invoke())
@@ -230,6 +231,7 @@ class StrandsAgentRunner:
                     raise WorkflowError(f"{role.value} agent failed: {exc}") from exc
                 if result.structured_output is None:
                     raise WorkflowError(f"{role.value} agent returned no structured output")
+                _log_finished_step(role)
                 return result.structured_output
 
         return asyncio.run(invoke())
@@ -258,6 +260,7 @@ class StrandsAgentRunner:
                     raise WorkflowError(f"{role.value} agent failed: {exc}") from exc
                 if result.structured_output is None:
                     raise WorkflowError(f"{role.value} agent returned no structured output")
+                _log_finished_step(role, len(result.structured_output.findings))
                 return result.structured_output
 
         return asyncio.run(invoke())
@@ -286,6 +289,7 @@ class StrandsAgentRunner:
                     raise WorkflowError(f"{role.value} agent failed: {exc}") from exc
                 if result.structured_output is None:
                     raise WorkflowError(f"{role.value} agent returned no structured output")
+                _log_finished_step(role, len(result.structured_output.findings))
                 return result.structured_output
 
         return asyncio.run(invoke())
@@ -314,6 +318,7 @@ class StrandsAgentRunner:
                     raise WorkflowError(f"{role.value} agent failed: {exc}") from exc
                 if result.structured_output is None:
                     raise WorkflowError(f"{role.value} agent returned no structured output")
+                _log_finished_step(role, len(result.structured_output.findings))
                 return result.structured_output
 
         return asyncio.run(invoke())
@@ -342,6 +347,7 @@ class StrandsAgentRunner:
                     raise WorkflowError(f"{role.value} agent failed: {exc}") from exc
                 if result.structured_output is None:
                     raise WorkflowError(f"{role.value} agent returned no structured output")
+                _log_finished_step(role)
                 return result.structured_output
 
         return asyncio.run(invoke())
@@ -373,6 +379,7 @@ class StrandsAgentRunner:
                     raise WorkflowError(f"{role.value} agent failed: {exc}") from exc
                 if result.structured_output is None:
                     raise WorkflowError(f"{role.value} agent returned no structured output")
+                _log_finished_step(role, len(result.structured_output.findings))
                 return result.structured_output
 
         return asyncio.run(invoke())
@@ -427,6 +434,16 @@ class StrandsAgentRunner:
         if not path.is_file():
             raise WorkflowError(f"prompt is missing for {role.value}: {path}")
         return path.read_text(encoding="utf-8")
+
+
+def _log_finished_step(role: AgentRole, issues_found: int | None = None) -> None:
+    LOGGER.info(
+        "Finished workflow step: %s (agent: %s)",
+        AGENT_STEP_NAMES[role],
+        role.value,
+    )
+    if issues_found is not None:
+        LOGGER.info("%s found %d issues", role.value, issues_found)
 
 
 def runtime_agent_runner(

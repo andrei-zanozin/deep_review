@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from copy import deepcopy
 from typing import Any, Literal
 
@@ -9,6 +10,8 @@ from deep_review.infrastructure import AgentRunner, Commands
 from deep_review.models import DiscoveryResult, FixVerifierDecision, PullRequestTarget
 
 FixVerifierStatus = Literal["No issues found", "Done"]
+
+LOGGER = logging.getLogger(__name__)
 
 
 def reconcile(
@@ -62,6 +65,11 @@ def plan_reconciliation(
         if decision.comment_id != root.get("id"):
             raise WorkflowError("fix_verifier decision references a different comment")
         decisions.append(decision)
+    LOGGER.info(
+        "fix_verifier: Resolved %d/%d",
+        sum(decision.action == "resolve" for decision in decisions),
+        len(roots),
+    )
     return decisions, roots
 
 

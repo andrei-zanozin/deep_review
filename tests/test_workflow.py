@@ -163,10 +163,10 @@ def test_findings_are_preflighted_before_mocked_publication(
     with caplog.at_level(logging.INFO, logger="deep_review.publication"):
         execute_review("ABC-123", git_repository, commands, agents)
 
-    assert (
-        "preflighting finding location: id=architecture_expert:1, "
-        "path=code.txt, line=2, side=destination, placement=inline"
-    ) in [record.getMessage() for record in caplog.records]
+    assert not any(
+        "preflighting finding location" in record.getMessage() for record in caplog.records
+    )
+    assert "posted issues: 1" in [record.getMessage() for record in caplog.records]
     comment = next(
         args for server, name, args in commands.calls if name == "add_pull_request_comment"
     )
