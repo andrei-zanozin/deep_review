@@ -73,6 +73,7 @@ class FakeAgents:
         self.has_finding = has_finding
         self.finding_line = finding_line
         self.roles: list[AgentRole] = []
+        self.location_payload: dict[str, Any] | None = None
 
     def discovery(self, _: dict[str, Any]) -> DiscoveryResult:
         self.roles.append(AgentRole.DISCOVERY)
@@ -127,8 +128,11 @@ class FakeAgents:
             ]
         )
 
-    def location_verifier(self, _: dict[str, Any], __: Path) -> LocationVerification:
+    def location_verifier(
+        self, payload: dict[str, Any], __: Path
+    ) -> LocationVerification:
         self.roles.append(AgentRole.LOCATION_VERIFIER)
+        self.location_payload = payload
         return LocationVerification(
             decisions=[
                 {
@@ -173,13 +177,16 @@ def test_findings_are_preflighted_before_mocked_publication(
     head = run_git(git_repository, "rev-parse", "HEAD")
     commands = FakeCommands(head, base)
 
+    agents = FakeAgents(has_finding=True)
     with caplog.at_level(logging.INFO, logger="deep_review.publication"):
-        execute_review("ABC-123", git_repository, commands, FakeAgents(has_finding=True))
+        execute_review("ABC-123", git_repository, commands, agents)
 
     assert (
         "preflighting finding location: id=architecture_expert:1, "
         "path=code.txt, line=2, side=destination, placement=inline"
     ) in [record.getMessage() for record in caplog.records]
+    assert agents.location_payload is not None
+    assert agents.location_payload["comparison_base"] == base
 
     comment = next(
         args for server, name, args in commands.calls if name == "add_pull_request_comment"

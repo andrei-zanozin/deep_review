@@ -11,7 +11,6 @@ from deep_review.models import Finding, PullRequestTarget
 from deep_review.repository import (
     discover_repository,
     discover_sibling_repositories,
-    finding_is_changed,
     finding_location_exists,
     location_in_diff,
     parse_bitbucket_remote,
@@ -174,7 +173,8 @@ def test_local_location_validation_has_no_context_distance_limit(
     )
 
     assert finding_location_exists(git_repository, target, finding)
-    assert not finding_is_changed(git_repository, target, finding)
+    changed_diff = pull_request_diff(git_repository, target, unified=0)
+    assert not location_in_diff(changed_diff, finding)
 
 
 def test_local_diff_validates_late_added_line_and_new_file_line(
@@ -219,4 +219,71 @@ def test_local_diff_validates_late_added_line_and_new_file_line(
             evidence="The line is added by the pull request.",
         )
         assert finding_location_exists(git_repository, target, finding)
-        assert finding_is_changed(git_repository, target, finding)
+        assert location_in_diff(pull_request_diff(git_repository, target, unified=0), finding)
+
+
+def test_local_diff_classifies_removed_and_unchanged_source_lines(
+    git_repository: Path,
+) -> None:
+    (git_repository / "code.txt").write_text("old\nkeep\n", encoding="utf-8")
+    run_git(git_repository, "add", "code.txt")
+    run_git(git_repository, "commit", "-m", "source base")
+    base = run_git(git_repository, "rev-parse", "HEAD")
+    (git_repository / "code.txt").write_text("new\nkeep\n", encoding="utf-8")
+    run_git(git_repository, "add", "code.txt")
+    run_git(git_repository, "commit", "-m", "replace first line")
+    head = run_git(git_repository, "rev-parse", "HEAD")
+    target = PullRequestTarget(
+        id=1,
+        project="PRJ",
+        repository="repository",
+        source_branch="main",
+        target_branch="develop",
+        reviewed_head=head,
+        reviewed_base=base,
+    )
+    removed = Finding(
+        severity="Major",
+        title="Removed line",
+        path="code.txt",
+        line=1,
+        side="source",
+        problem_and_impact="The removed behavior is required.",
+        suggested_fix="Restore it.",
+        evidence="The pull request removes the line.",
+    )
+    unchanged = removed.model_copy(update={"line": 2})
+    changed_diff = pull_request_diff(git_repository, target, unified=0)
+
+    assert finding_location_exists(git_repository, target, removed)
+    assert location_in_diff(changed_diff, removed)
+    assert finding_location_exists(git_repository, target, unchanged)
+    assert not location_in_diff(changed_diff, unchanged)
+
+
+def test_binary_finding_location_is_invalid(git_repository: Path) -> None:
+    (git_repository / "binary.dat").write_bytes(b"first\0second")
+    run_git(git_repository, "add", "binary.dat")
+    run_git(git_repository, "commit", "-m", "binary")
+    head = run_git(git_repository, "rev-parse", "HEAD")
+    target = PullRequestTarget(
+        id=1,
+        project="PRJ",
+        repository="repository",
+        source_branch="main",
+        target_branch="develop",
+        reviewed_head=head,
+        reviewed_base=head,
+    )
+    finding = Finding(
+        severity="Major",
+        title="Binary location",
+        path="binary.dat",
+        line=1,
+        side="destination",
+        problem_and_impact="Binary content cannot identify a text line.",
+        suggested_fix="Use a text-file location.",
+        evidence="The file contains binary data.",
+    )
+
+    assert not finding_location_exists(git_repository, target, finding)

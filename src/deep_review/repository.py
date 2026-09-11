@@ -203,10 +203,6 @@ def finding_location_exists(root: Path, target: PullRequestTarget, finding: Find
     return finding.line <= len(result.stdout.splitlines())
 
 
-def finding_is_changed(root: Path, target: PullRequestTarget, finding: Finding) -> bool:
-    return location_in_diff(pull_request_diff(root, target, unified=0), finding)
-
-
 def _ensure_commit(root: Path, branch: str, commit: str) -> None:
     exists = subprocess.run(
         ["git", "cat-file", "-e", f"{commit}^{{commit}}"],

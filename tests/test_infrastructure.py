@@ -20,11 +20,11 @@ from deep_review.infrastructure import (
 from deep_review.models import (
     AgentRole,
     ConsolidationResult,
+    CrossPrValidationResult,
     DiscoveryResult,
+    FixVerifierDecision,
     LocationVerification,
     ReviewResult,
-    FixVerifierDecision,
-    CrossPrValidationResult,
 )
 
 
@@ -240,7 +240,8 @@ def test_agent_invocations_own_distinct_direct_and_proxied_clients(
     messages = {record.getMessage() for record in caplog.records}
     assert messages >= {
         "Starting workflow step: Review architecture and design (agent: architecture_expert)",
-        "Starting workflow step: Review implementation-level correctness (agent: implementation_expert)",
+        "Starting workflow step: Review implementation-level correctness "
+        "(agent: implementation_expert)",
     }
 
 

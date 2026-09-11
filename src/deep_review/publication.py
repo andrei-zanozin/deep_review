@@ -13,7 +13,12 @@ from deep_review.models import (
     FixVerifierDecision,
     PullRequestTarget,
 )
-from deep_review.repository import finding_location_exists, location_in_diff, pull_request_diff
+from deep_review.repository import (
+    finding_location_exists,
+    location_in_diff,
+    pull_request_diff,
+    pull_request_merge_base,
+)
 from deep_review.review import render_finding
 
 LOGGER = logging.getLogger(__name__)
@@ -142,6 +147,7 @@ def _preflight(
     verification = agents.location_verifier(
         {
             "pull_request": target.model_dump(mode="json"),
+            "comparison_base": pull_request_merge_base(repository_root, target),
             "diff": diff,
             "findings": [candidate.model_dump(mode="json") for candidate in findings],
         },

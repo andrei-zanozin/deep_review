@@ -21,11 +21,11 @@ from deep_review.errors import WorkflowError
 from deep_review.models import (
     AgentRole,
     ConsolidationResult,
+    CrossPrValidationResult,
     DiscoveryResult,
+    FixVerifierDecision,
     LocationVerification,
     ReviewResult,
-    FixVerifierDecision,
-    CrossPrValidationResult,
 )
 from deep_review.repository import repository_tools
 

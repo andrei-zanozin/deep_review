@@ -6,7 +6,7 @@ from typing import Any, Literal
 from deep_review.discovery import all_pages
 from deep_review.errors import WorkflowError
 from deep_review.infrastructure import AgentRunner, Commands
-from deep_review.models import DiscoveryResult, PullRequestTarget, FixVerifierDecision
+from deep_review.models import DiscoveryResult, FixVerifierDecision, PullRequestTarget
 
 FixVerifierStatus = Literal["No issues found", "Done"]
 
