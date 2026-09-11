@@ -11,11 +11,11 @@ from deep_review.models import (
     AgentRole,
     CandidateFinding,
     ConsolidationResult,
+    CrossPrValidationResult,
     Finding,
     PullRequestTarget,
     ReviewResult,
     Severity,
-    CrossPrValidationResult,
     TicketReviewContext,
 )
 
@@ -93,6 +93,7 @@ def validate_cross_prs(
                     "key": item.key.model_dump(mode="json"),
                     "target": item.target.model_dump(mode="json"),
                     "metadata": deepcopy(item.metadata),
+                    "diff": item.diff,
                     "mode": item.mode,
                     "specialist_results": {
                         role.value: output.model_dump(mode="json")
@@ -157,8 +158,6 @@ def _validate_consolidation(
             (by_id[candidate_id].finding.severity for candidate_id in group),
             key=SEVERITY_RANK.__getitem__,
         )
-        if selection.severity != expected:
-            raise WorkflowError("consolidation did not preserve the highest severity")
         selected = by_id[selection.selected_id]
         consolidated.append(
             selected.model_copy(

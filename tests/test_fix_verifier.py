@@ -3,8 +3,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from deep_review.models import DiscoveryResult, PullRequestTarget, FixVerifierDecision
 from deep_review.fix_verifier import plan_reconciliation, reconcile
+from deep_review.models import DiscoveryResult, FixVerifierDecision, PullRequestTarget
 
 
 class SecondaryCommands:
@@ -58,6 +58,7 @@ def test_fix_verifier_resolves_and_verifies_each_comment() -> None:
             source_branch="feature",
             target_branch="main",
             reviewed_head="a" * 40,
+            reviewed_base="b" * 40,
         ),
         Path("."),
         commands,
@@ -82,6 +83,7 @@ def test_fix_verifier_planning_does_not_mutate_comments() -> None:
         source_branch="feature",
         target_branch="main",
         reviewed_head="a" * 40,
+        reviewed_base="b" * 40,
     )
 
     decisions, roots = plan_reconciliation(

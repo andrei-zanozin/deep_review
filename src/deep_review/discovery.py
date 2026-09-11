@@ -144,6 +144,7 @@ def _target(pull_request: dict[str, Any]) -> PullRequestTarget:
             source_branch=source["name"],
             target_branch=target["name"],
             reviewed_head=source["commit"],
+            reviewed_base=target["commit"],
         )
     except (KeyError, ValueError) as exc:
         raise WorkflowError(f"pull request has incomplete metadata: {exc}") from exc

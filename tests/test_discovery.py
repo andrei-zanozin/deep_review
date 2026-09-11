@@ -2,9 +2,24 @@ from __future__ import annotations
 
 import pytest
 
-from deep_review.discovery import _validate_people
+from deep_review.discovery import _target, _validate_people
 from deep_review.errors import WorkflowError
 from deep_review.models import DiscoveryResult
+
+
+def test_pull_request_target_preserves_head_and_base_commits() -> None:
+    target = _target(
+        {
+            "id": 1516,
+            "project": "PURCHASING_IT",
+            "repository": "onecontrolling-rmi",
+            "source": {"name": "feature/CPREQ-143684", "commit": "a" * 40},
+            "target": {"name": "develop", "commit": "b" * 40},
+        }
+    )
+
+    assert target.reviewed_head == "a" * 40
+    assert target.reviewed_base == "b" * 40
 
 
 def test_reviewer_mismatch_identifies_discovery_and_jira_users() -> None:

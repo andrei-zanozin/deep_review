@@ -115,8 +115,10 @@ def parse_bitbucket_remote(remote: str) -> tuple[str, str]:
 
 def prepare_checkout(root: Path, target: PullRequestTarget) -> None:
     _validate_branch(root, target.source_branch)
+    _validate_branch(root, target.target_branch)
     if git(root, "status", "--porcelain"):
         raise WorkflowError("local PR checkout verification failed: local checkout is not clean")
+    _ensure_commit(root, target.target_branch, target.reviewed_base)
     if git(root, "rev-parse", "HEAD") == target.reviewed_head:
         return
 
@@ -163,6 +165,78 @@ def prepare_checkout(root: Path, target: PullRequestTarget) -> None:
         raise WorkflowError("local PR checkout verification failed: final verification failed")
 
 
+def pull_request_diff(root: Path, target: PullRequestTarget, unified: int = 3) -> str:
+    if unified < 0:
+        raise ValueError("diff context must not be negative")
+    base = pull_request_merge_base(root, target)
+    diff = git(
+        root,
+        "diff",
+        "--no-ext-diff",
+        "--find-renames",
+        f"--unified={unified}",
+        base,
+        target.reviewed_head,
+    )
+    return f"{diff}\n" if diff else "No changes."
+
+
+def pull_request_merge_base(root: Path, target: PullRequestTarget) -> str:
+    return git(root, "merge-base", target.reviewed_base, target.reviewed_head)
+
+
+def finding_location_exists(root: Path, target: PullRequestTarget, finding: Finding) -> bool:
+    revision = (
+        pull_request_merge_base(root, target)
+        if finding.side == Side.SOURCE
+        else target.reviewed_head
+    )
+    result = subprocess.run(
+        ["git", "show", f"{revision}:{_safe_relative(finding.path)}"],
+        cwd=root,
+        check=False,
+        capture_output=True,
+        timeout=30,
+    )
+    if result.returncode or b"\0" in result.stdout:
+        return False
+    return finding.line <= len(result.stdout.splitlines())
+
+
+def finding_is_changed(root: Path, target: PullRequestTarget, finding: Finding) -> bool:
+    return location_in_diff(pull_request_diff(root, target, unified=0), finding)
+
+
+def _ensure_commit(root: Path, branch: str, commit: str) -> None:
+    exists = subprocess.run(
+        ["git", "cat-file", "-e", f"{commit}^{{commit}}"],
+        cwd=root,
+        check=False,
+        timeout=30,
+    ).returncode == 0
+    if exists:
+        return
+    remote_ref = f"refs/remotes/origin/{branch}"
+    git(
+        root,
+        "fetch",
+        "--no-write-fetch-head",
+        "origin",
+        f"refs/heads/{branch}:{remote_ref}",
+    )
+    exists = subprocess.run(
+        ["git", "cat-file", "-e", f"{commit}^{{commit}}"],
+        cwd=root,
+        check=False,
+        timeout=30,
+    ).returncode == 0
+    if not exists:
+        raise WorkflowError(
+            "local PR checkout verification failed: fetched branch does not contain "
+            "the reviewed commit"
+        )
+
+
 def location_in_diff(diff: str, finding: Finding) -> bool:
     try:
         patch = PatchSet(diff.splitlines(keepends=True))
@@ -177,7 +251,7 @@ def location_in_diff(diff: str, finding: Finding) -> bool:
             for line in hunk:
                 number = line.source_line_no if finding.side == Side.SOURCE else line.target_line_no
                 changed = (
-                    line.is_removed
+                    line.is_removed or line.is_context
                     if finding.side == Side.SOURCE
                     else line.is_added or line.is_context
                 )

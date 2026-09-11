@@ -11,9 +11,12 @@ from deep_review.models import Finding, PullRequestTarget
 from deep_review.repository import (
     discover_repository,
     discover_sibling_repositories,
+    finding_is_changed,
+    finding_location_exists,
     location_in_diff,
     parse_bitbucket_remote,
     prepare_checkout,
+    pull_request_diff,
 )
 
 
@@ -104,6 +107,7 @@ def test_prepare_checkout_rejects_dirty_repository(git_repository: Path) -> None
         source_branch="feature",
         target_branch="main",
         reviewed_head=run_git(git_repository, "rev-parse", "HEAD"),
+        reviewed_base=run_git(git_repository, "rev-parse", "HEAD"),
     )
     with pytest.raises(WorkflowError, match="not clean"):
         prepare_checkout(git_repository, target)
@@ -127,4 +131,92 @@ def test_location_must_be_an_actual_changed_line(git_repository: Path) -> None:
     )
     assert location_in_diff(diff, finding)
     assert location_in_diff(diff, finding.model_copy(update={"line": 1}))
+    assert location_in_diff(
+        diff,
+        finding.model_copy(update={"line": 1, "side": "source"}),
+    )
     assert not location_in_diff(diff, finding.model_copy(update={"line": 3}))
+
+
+def test_local_location_validation_has_no_context_distance_limit(
+    git_repository: Path,
+) -> None:
+    original = "\n".join(f"line {number}" for number in range(1, 1_502)) + "\n"
+    (git_repository / "code.txt").write_text(original, encoding="utf-8")
+    run_git(git_repository, "add", "code.txt")
+    run_git(git_repository, "commit", "-m", "large base")
+    base = run_git(git_repository, "rev-parse", "HEAD")
+    (git_repository / "code.txt").write_text(
+        original.replace("line 1\n", "changed line 1\n", 1),
+        encoding="utf-8",
+    )
+    run_git(git_repository, "add", "code.txt")
+    run_git(git_repository, "commit", "-m", "change first line")
+    head = run_git(git_repository, "rev-parse", "HEAD")
+    target = PullRequestTarget(
+        id=1,
+        project="PRJ",
+        repository="repository",
+        source_branch="main",
+        target_branch="develop",
+        reviewed_head=head,
+        reviewed_base=base,
+    )
+    finding = Finding(
+        severity="Major",
+        title="Distant existing line",
+        path="code.txt",
+        line=1_500,
+        side="destination",
+        problem_and_impact="The line provides relevant evidence.",
+        suggested_fix="Correct the affected behavior.",
+        evidence="The line exists at the reviewed head.",
+    )
+
+    assert finding_location_exists(git_repository, target, finding)
+    assert not finding_is_changed(git_repository, target, finding)
+
+
+def test_local_diff_validates_late_added_line_and_new_file_line(
+    git_repository: Path,
+) -> None:
+    (git_repository / "production.txt").write_text(
+        "\n".join(f"base {number}" for number in range(1, 395)) + "\n",
+        encoding="utf-8",
+    )
+    run_git(git_repository, "add", "production.txt")
+    run_git(git_repository, "commit", "-m", "production base")
+    base = run_git(git_repository, "rev-parse", "HEAD")
+    with (git_repository / "production.txt").open("a", encoding="utf-8") as stream:
+        stream.write("added line 395\n")
+    (git_repository / "new-test.txt").write_text(
+        "\n".join(f"test {number}" for number in range(1, 19)) + "\n",
+        encoding="utf-8",
+    )
+    run_git(git_repository, "add", "production.txt", "new-test.txt")
+    run_git(git_repository, "commit", "-m", "reviewed change")
+    head = run_git(git_repository, "rev-parse", "HEAD")
+    target = PullRequestTarget(
+        id=1,
+        project="PRJ",
+        repository="repository",
+        source_branch="main",
+        target_branch="develop",
+        reviewed_head=head,
+        reviewed_base=base,
+    )
+
+    assert "added line 395" in pull_request_diff(git_repository, target)
+    for path, line in (("production.txt", 395), ("new-test.txt", 18)):
+        finding = Finding(
+            severity="Major",
+            title="Changed line",
+            path=path,
+            line=line,
+            side="destination",
+            problem_and_impact="The changed line has a problem.",
+            suggested_fix="Correct it.",
+            evidence="The line is added by the pull request.",
+        )
+        assert finding_location_exists(git_repository, target, finding)
+        assert finding_is_changed(git_repository, target, finding)

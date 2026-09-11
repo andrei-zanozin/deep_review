@@ -55,6 +55,7 @@ class PullRequestTarget(StrictModel):
     source_branch: str = Field(min_length=1)
     target_branch: str = Field(min_length=1)
     reviewed_head: str = Field(pattern=r"^(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})$")
+    reviewed_base: str = Field(pattern=r"^(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})$")
 
     def mcp_arguments(self) -> dict[str, int | str]:
         return {"project": self.project, "repo": self.repository, "pr_id": self.id}

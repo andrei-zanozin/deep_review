@@ -49,7 +49,6 @@ BITBUCKET_READ_TOOLS = {
     "search_review_pull_requests",
     "search_pull_requests",
     "get_pull_request",
-    "get_pull_request_diff",
     "get_pull_request_comments",
 }
 

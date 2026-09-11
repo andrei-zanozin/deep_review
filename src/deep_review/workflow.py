@@ -8,6 +8,7 @@ from typing import Literal
 from deep_review.configuration import load_config, project_config_path
 from deep_review.discovery import discover, find_targets
 from deep_review.errors import WorkflowError
+from deep_review.fix_verifier import plan_reconciliation
 from deep_review.infrastructure import (
     AgentRunner,
     Commands,
@@ -19,16 +20,18 @@ from deep_review.models import (
     CandidateFinding,
     DiscoveryResult,
     PrReviewContext,
-    PullRequestTarget,
     RepositoryIdentity,
     ReviewType,
     TicketReviewContext,
     _repository_identity_key,
 )
 from deep_review.publication import finish_jira, publish, report_incomplete_jira
-from deep_review.repository import discover_sibling_repositories, prepare_checkout
-from deep_review.review import consolidate, validate_cross_prs, run_specialists
-from deep_review.fix_verifier import plan_reconciliation
+from deep_review.repository import (
+    discover_sibling_repositories,
+    prepare_checkout,
+    pull_request_diff,
+)
+from deep_review.review import consolidate, run_specialists, validate_cross_prs
 
 LOGGER = logging.getLogger(__name__)
 
@@ -126,7 +129,7 @@ def _prepare_pull_requests(
         pull_request.repository = repository
         try:
             prepare_checkout(repository.root, pull_request.target)
-            pull_request.diff = _verified_diff(pull_request.target, commands)
+            pull_request.diff = pull_request_diff(repository.root, pull_request.target)
             pull_request.status = "prepared"
             if pull_request.mode == "evidence_only":
                 continue
@@ -217,6 +220,7 @@ def _publish_pull_requests(
                 pull_request.target,
                 pull_request.findings,
                 None,
+                pull_request.diff or "No changes.",
                 pull_request.repository.root,
                 commands,
                 agents,
@@ -250,12 +254,3 @@ def _fail_pull_request(
     pull_request.status = status
     pull_request.failure_reason = reason
     ticket.failures.append(f"{_pull_request_label(pull_request)}: {reason}")
-
-
-def _verified_diff(target: PullRequestTarget, commands: Commands) -> str:
-    diff = commands.bitbucket("get_pull_request_diff", target.mcp_arguments())
-    if not isinstance(diff, str) or not diff.strip():
-        raise WorkflowError("pull-request diff is unavailable")
-    if diff.startswith("[Warning: Bitbucket truncated this diff.]"):
-        raise WorkflowError("Bitbucket returned a truncated pull-request diff")
-    return diff

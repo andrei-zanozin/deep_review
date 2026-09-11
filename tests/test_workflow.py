@@ -10,19 +10,19 @@ from conftest import run_git
 from deep_review.models import (
     AgentRole,
     ConsolidationResult,
+    CrossPrValidationResult,
     DiscoveryResult,
+    FixVerifierDecision,
     LocationVerification,
     ReviewResult,
-    FixVerifierDecision,
-    CrossPrValidationResult,
 )
 from deep_review.workflow import execute_review
 
 
 class FakeCommands:
-    def __init__(self, head: str, diff: str = "No changes.") -> None:
+    def __init__(self, head: str, base: str | None = None) -> None:
         self.head = head
-        self.diff = diff
+        self.base = base or head
         self.calls: list[tuple[str, str, dict[str, Any]]] = []
 
     def jira(self, name: str, arguments: dict[str, Any]) -> Any:
@@ -52,23 +52,26 @@ class FakeCommands:
                             {"user": {"slug": "reviewer"}, "status": "UNAPPROVED"}
                         ],
                         "source": {"name": "main", "commit": self.head},
-                        "target": {"name": "develop", "commit": "b" * 40},
+                        "target": {"name": "develop", "commit": self.base},
                     }
                 ],
                 "next_cursor": None,
             }
         if name == "get_pull_request":
-            return {"id": 4, "source": {"name": "main", "commit": self.head}}
-        if name == "get_pull_request_diff":
-            return self.diff
+            return {
+                "id": 4,
+                "source": {"name": "main", "commit": self.head},
+                "target": {"name": "develop", "commit": self.base},
+            }
         if name in {"add_pull_request_comment", "set_review_status"}:
             return {}
         raise AssertionError((name, arguments))
 
 
 class FakeAgents:
-    def __init__(self, has_finding: bool) -> None:
+    def __init__(self, has_finding: bool, finding_line: int = 2) -> None:
         self.has_finding = has_finding
+        self.finding_line = finding_line
         self.roles: list[AgentRole] = []
 
     def discovery(self, _: dict[str, Any]) -> DiscoveryResult:
@@ -95,7 +98,7 @@ class FakeAgents:
                     "severity": "Major",
                     "title": "Bad added value",
                     "path": "code.txt",
-                    "line": 2,
+                    "line": self.finding_line,
                     "side": "destination",
                     "problem_and_impact": "The value breaks the required behavior.",
                     "suggested_fix": "Use the required value.",
@@ -160,16 +163,23 @@ def test_primary_no_issues_approves_and_finishes_jira(git_repository: Path) -> N
     assert AgentRole.LOCATION_VERIFIER not in agents.roles
 
 
-def test_findings_are_preflighted_before_mocked_publication(git_repository: Path) -> None:
+def test_findings_are_preflighted_before_mocked_publication(
+    git_repository: Path, caplog: pytest.LogCaptureFixture
+) -> None:
     base = run_git(git_repository, "rev-parse", "HEAD")
     (git_repository / "code.txt").write_text("base\nbad\n", encoding="utf-8")
     run_git(git_repository, "add", "code.txt")
     run_git(git_repository, "commit", "-m", "reviewed")
     head = run_git(git_repository, "rev-parse", "HEAD")
-    diff = run_git(git_repository, "diff", base, head) + "\n"
-    commands = FakeCommands(head, diff)
+    commands = FakeCommands(head, base)
 
-    execute_review("ABC-123", git_repository, commands, FakeAgents(has_finding=True))
+    with caplog.at_level(logging.INFO, logger="deep_review.publication"):
+        execute_review("ABC-123", git_repository, commands, FakeAgents(has_finding=True))
+
+    assert (
+        "preflighting finding location: id=architecture_expert:1, "
+        "path=code.txt, line=2, side=destination, placement=inline"
+    ) in [record.getMessage() for record in caplog.records]
 
     comment = next(
         args for server, name, args in commands.calls if name == "add_pull_request_comment"
@@ -189,17 +199,83 @@ def test_execute_review_does_not_construct_runtime_dependencies(
     execute_review("ABC-123", git_repository, FakeCommands(head), FakeAgents(False))
 
 
-def test_truncated_diff_stops_before_specialist_agents(git_repository: Path) -> None:
+def test_valid_unchanged_location_is_posted_as_general_comment(
+    git_repository: Path,
+) -> None:
+    base = run_git(git_repository, "rev-parse", "HEAD")
+    (git_repository / "code.txt").write_text("base\nbad\n", encoding="utf-8")
+    run_git(git_repository, "add", "code.txt")
+    run_git(git_repository, "commit", "-m", "reviewed")
     head = run_git(git_repository, "rev-parse", "HEAD")
-    commands = FakeCommands(head, "[Warning: Bitbucket truncated this diff.]\npartial")
+    commands = FakeCommands(head, base)
+
+    execute_review(
+        "ABC-123",
+        git_repository,
+        commands,
+        FakeAgents(has_finding=True, finding_line=1),
+    )
+
+    comment = next(
+        args for _, name, args in commands.calls if name == "add_pull_request_comment"
+    )
+    assert "anchor" not in comment
+    assert "Location: code.txt:1 (destination)" in comment["text"]
+
+
+def test_workflow_does_not_request_bitbucket_raw_diff(git_repository: Path) -> None:
+    head = run_git(git_repository, "rev-parse", "HEAD")
+    commands = FakeCommands(head)
     agents = FakeAgents(False)
 
     result = execute_review("ABC-123", git_repository, commands, agents)
 
-    assert agents.roles == [AgentRole.DISCOVERY]
+    assert result.status == "complete"
+    assert not any(name == "get_pull_request_diff" for _, name, _ in commands.calls)
+
+
+def test_target_commit_drift_stops_publication(git_repository: Path) -> None:
+    head = run_git(git_repository, "rev-parse", "HEAD")
+
+    class DriftCommands(FakeCommands):
+        def bitbucket(self, name: str, arguments: dict[str, Any]) -> Any:
+            result = super().bitbucket(name, arguments)
+            if name == "get_pull_request":
+                result["target"]["commit"] = "f" * 40
+            return result
+
+    commands = DriftCommands(head)
+    result = execute_review("ABC-123", git_repository, commands, FakeAgents(False))
+
     assert result.status == "failed"
-    assert "truncated" in result.failures[0]
-    assert not any(name == "set_review_status" for _, name, _ in commands.calls)
+    assert "head or base changed" in result.failures[0]
+    assert not any(
+        name in {"add_pull_request_comment", "set_review_status"}
+        for _, name, _ in commands.calls
+    )
+
+
+def test_invalid_local_location_stops_publication(git_repository: Path) -> None:
+    base = run_git(git_repository, "rev-parse", "HEAD")
+    (git_repository / "code.txt").write_text("base\nbad\n", encoding="utf-8")
+    run_git(git_repository, "add", "code.txt")
+    run_git(git_repository, "commit", "-m", "reviewed")
+    head = run_git(git_repository, "rev-parse", "HEAD")
+    commands = FakeCommands(head, base)
+
+    result = execute_review(
+        "ABC-123",
+        git_repository,
+        commands,
+        FakeAgents(has_finding=True, finding_line=3),
+    )
+
+    assert result.status == "failed"
+    assert "invalid locations: architecture_expert:1" in result.failures[0]
+    assert not any(
+        name in {"add_pull_request_comment", "set_review_status"}
+        for _, name, _ in commands.calls
+    )
 
 
 class MultiRepoCommands(FakeCommands):
@@ -235,7 +311,7 @@ class MultiRepoCommands(FakeCommands):
                             }
                         ],
                         "source": {"name": "main", "commit": head},
-                        "target": {"name": "develop", "commit": "b" * 40},
+                        "target": {"name": "develop", "commit": head},
                     }
                     for index, (repository, head) in enumerate(self.heads.items(), start=1)
                 ],
@@ -243,9 +319,10 @@ class MultiRepoCommands(FakeCommands):
             }
         repository = str(arguments["repo"])
         if name == "get_pull_request":
-            return {"source": {"name": "main", "commit": self.heads[repository]}}
-        if name == "get_pull_request_diff":
-            return "No changes."
+            return {
+                "source": {"name": "main", "commit": self.heads[repository]},
+                "target": {"name": "develop", "commit": self.heads[repository]},
+            }
         if name in {"add_pull_request_comment", "set_review_status"}:
             return {}
         raise AssertionError((name, arguments))

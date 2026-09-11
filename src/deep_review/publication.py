@@ -1,32 +1,36 @@
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import Any
 
 from deep_review.errors import WorkflowError
+from deep_review.fix_verifier import FixVerifierStatus, apply_reconciliation
 from deep_review.infrastructure import AgentRunner, Commands
 from deep_review.models import (
     CandidateFinding,
     DiscoveryResult,
-    PullRequestTarget,
     FixVerifierDecision,
+    PullRequestTarget,
 )
-from deep_review.repository import location_in_diff
+from deep_review.repository import finding_location_exists, location_in_diff, pull_request_diff
 from deep_review.review import render_finding
-from deep_review.fix_verifier import FixVerifierStatus, apply_reconciliation
+
+LOGGER = logging.getLogger(__name__)
 
 
 def publish(
     target: PullRequestTarget,
     findings: list[CandidateFinding],
     fix_verifier_status: FixVerifierStatus | None,
+    diff: str,
     repository_root: Path,
     commands: Commands,
     agents: AgentRunner,
     fix_verifier_decisions: list[FixVerifierDecision] | None = None,
     discovery: DiscoveryResult | None = None,
 ) -> tuple[bool, FixVerifierStatus | None]:
-    diff = _preflight(target, findings, repository_root, commands, agents)
+    inline = _preflight(target, findings, diff, repository_root, commands, agents)
     if fix_verifier_decisions is not None:
         if discovery is None:
             raise WorkflowError("fix_verifier publication requires discovery context")
@@ -36,19 +40,21 @@ def publish(
     if findings:
         if not diff:
             raise WorkflowError("pull-request diff is empty before publication")
-        for candidate in findings:
+        for candidate, is_inline in zip(findings, inline, strict=True):
             finding = candidate.finding
+            arguments: dict[str, Any] = {
+                **target.mcp_arguments(),
+                "text": render_finding(finding, anchored=is_inline),
+            }
+            if is_inline:
+                arguments["anchor"] = {
+                    "path": finding.path,
+                    "line": finding.line,
+                    "side": finding.side.value,
+                }
             commands.bitbucket(
                 "add_pull_request_comment",
-                {
-                    **target.mcp_arguments(),
-                    "text": render_finding(finding, anchored=True),
-                    "anchor": {
-                        "path": finding.path,
-                        "line": finding.line,
-                        "side": finding.side.value,
-                    },
-                },
+                arguments,
             )
 
     needs_work = bool(findings) or fix_verifier_status == "Done"
@@ -96,28 +102,42 @@ def report_incomplete_jira(
 def _preflight(
     target: PullRequestTarget,
     findings: list[CandidateFinding],
+    diff: str,
     repository_root: Path,
     commands: Commands,
     agents: AgentRunner,
-) -> str:
+) -> list[bool]:
     current = commands.bitbucket("get_pull_request", target.mcp_arguments())
-    if not isinstance(current, dict) or _head(current) != target.reviewed_head:
-        raise WorkflowError("pull-request head changed after review")
-    diff = commands.bitbucket("get_pull_request_diff", target.mcp_arguments())
-    if not isinstance(diff, str) or not diff.strip():
-        raise WorkflowError("pull-request diff is unavailable")
-    if diff.startswith("[Warning: Bitbucket truncated this diff.]"):
-        raise WorkflowError("Bitbucket returned a truncated pull-request diff")
-    invalid = [
-        candidate.id
-        for candidate in findings
-        if not location_in_diff(diff, candidate.finding)
-    ]
+    if (
+        not isinstance(current, dict)
+        or _commit(current, "source") != target.reviewed_head
+        or _commit(current, "target") != target.reviewed_base
+    ):
+        raise WorkflowError("pull-request head or base changed after review")
+    invalid = []
+    inline = []
+    changed_diff = pull_request_diff(repository_root, target, unified=0)
+    for candidate in findings:
+        finding = candidate.finding
+        exists = finding_location_exists(repository_root, target, finding)
+        is_inline = exists and location_in_diff(changed_diff, finding)
+        LOGGER.info(
+            "preflighting finding location: id=%s, path=%s, line=%d, side=%s, "
+            "placement=%s",
+            candidate.id,
+            finding.path,
+            finding.line,
+            finding.side.value,
+            "inline" if is_inline else "general" if exists else "invalid",
+        )
+        if not exists:
+            invalid.append(candidate.id)
+        inline.append(is_inline)
     if invalid:
-        raise WorkflowError(f"findings have invalid diff anchors: {', '.join(invalid)}")
+        raise WorkflowError(f"findings have invalid locations: {', '.join(invalid)}")
 
     if not findings:
-        return diff
+        return inline
 
     verification = agents.location_verifier(
         {
@@ -138,9 +158,9 @@ def _preflight(
     ]
     if failures:
         raise WorkflowError(f"location verification failed: {'; '.join(sorted(failures))}")
-    return diff
+    return inline
 
 
-def _head(pull_request: dict[str, Any]) -> str | None:
-    source = pull_request.get("source")
-    return source.get("commit") if isinstance(source, dict) else None
+def _commit(pull_request: dict[str, Any], ref: str) -> str | None:
+    value = pull_request.get(ref)
+    return value.get("commit") if isinstance(value, dict) else None

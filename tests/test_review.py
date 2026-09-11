@@ -6,13 +6,13 @@ from deep_review.errors import WorkflowError
 from deep_review.models import (
     CandidateFinding,
     ConsolidationResult,
+    CrossPrValidationResult,
     Finding,
     PrReviewContext,
     PullRequestTarget,
-    CrossPrValidationResult,
     TicketReviewContext,
 )
-from deep_review.review import _validate_consolidation, validate_cross_prs, render_finding
+from deep_review.review import _validate_consolidation, render_finding, validate_cross_prs
 
 
 def finding(severity: str = "Minor") -> Finding:
@@ -48,6 +48,26 @@ def test_consolidation_preserves_selected_content_and_highest_severity() -> None
     assert consolidated[0].finding.title == "Clear title"
 
 
+def test_consolidation_derives_highest_severity_when_agent_downgrades_group() -> None:
+    candidates = [
+        CandidateFinding(id="implementation_expert:1", finding=finding("Major")),
+        CandidateFinding(id="architecture_expert:1", finding=finding("Minor")),
+    ]
+    result = ConsolidationResult(
+        selections=[
+            {
+                "selected_id": "architecture_expert:1",
+                "duplicate_ids": ["implementation_expert:1"],
+                "severity": "Minor",
+            }
+        ]
+    )
+
+    consolidated = _validate_consolidation(candidates, result)
+
+    assert consolidated[0].finding.severity == "Major"
+
+
 def test_consolidation_requires_every_candidate() -> None:
     candidates = [CandidateFinding(id="implementation_expert:1", finding=finding())]
     with pytest.raises(WorkflowError, match="every candidate"):
@@ -72,6 +92,7 @@ def test_cross_pr_validator_rejects_unknown_target() -> None:
             source_branch=f"feature/{pr_id}",
             target_branch="main",
             reviewed_head=f"{pr_id}" * 40,
+            reviewed_base=f"{pr_id}" * 40,
         )
         return PrReviewContext(key=target.key, target=target, status="reviewed")
 
