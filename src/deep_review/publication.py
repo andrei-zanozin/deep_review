@@ -6,10 +6,8 @@ from typing import Any
 from deep_review.errors import WorkflowError
 from deep_review.infrastructure import AgentRunner, Commands
 from deep_review.models import (
-    AgentRole,
     CandidateFinding,
     DiscoveryResult,
-    LocationVerification,
     PullRequestTarget,
     SecondaryDecision,
 )
@@ -121,14 +119,12 @@ def _preflight(
     if not findings:
         return diff
 
-    verification = agents.run(
-        AgentRole.LOCATION_VERIFIER,
+    verification = agents.location_verifier(
         {
             "pull_request": target.model_dump(mode="json"),
             "diff": diff,
             "findings": [candidate.model_dump(mode="json") for candidate in findings],
         },
-        LocationVerification,
         repository_root,
     )
     by_id = {decision.finding_id: decision for decision in verification.decisions}

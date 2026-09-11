@@ -85,7 +85,7 @@ def test_ticket_correlation_rejects_unknown_target() -> None:
     )
 
     class Agent:
-        def run(self, *_: object, **__: object) -> TicketCorrelationResult:
+        def ticket_correlation(self, _: dict[str, object]) -> TicketCorrelationResult:
             return TicketCorrelationResult(
                 findings=[
                     {

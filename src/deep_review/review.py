@@ -42,10 +42,13 @@ def run_specialists(
     }
     with ThreadPoolExecutor(max_workers=len(REVIEW_ROLES)) as executor:
         futures = {
-            role: executor.submit(
-                agents.run, role, deepcopy(payload), ReviewResult, repository_root
-            )
-            for role in REVIEW_ROLES
+            AgentRole.ARCHITECTURE: executor.submit(
+                agents.architecture, deepcopy(payload), repository_root
+            ),
+            AgentRole.UNIT: executor.submit(agents.unit, deepcopy(payload), repository_root),
+            AgentRole.CODE_POLISH: executor.submit(
+                agents.code_polish, deepcopy(payload), repository_root
+            ),
         }
     results: dict[AgentRole, ReviewResult] = {}
     candidates: list[CandidateFinding] = []
@@ -72,8 +75,7 @@ def correlate_ticket(
     ]
     if len(available) < 2:
         return TicketCorrelationResult()
-    result = agents.run(
-        AgentRole.TICKET_CORRELATION,
+    result = agents.ticket_correlation(
         {
             "issue": deepcopy(context.issue),
             "jira_comments": deepcopy(context.jira_comments),
@@ -93,8 +95,7 @@ def correlate_ticket(
                 }
                 for item in available
             ],
-        },
-        TicketCorrelationResult,
+        }
     )
     known = {
         (item.key.project, item.key.repository, item.key.id): item for item in available
@@ -119,13 +120,11 @@ def consolidate(
 ) -> list[CandidateFinding]:
     if not candidates:
         return []
-    result = agents.run(
-        AgentRole.CONSOLIDATION,
+    result = agents.consolidation(
         {
             "candidates": [candidate.model_dump(mode="json") for candidate in candidates],
             "existing_reviewer_comments": existing_comments,
-        },
-        ConsolidationResult,
+        }
     )
     return _validate_consolidation(candidates, result, bool(existing_comments))
 

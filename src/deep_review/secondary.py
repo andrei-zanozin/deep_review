@@ -6,7 +6,7 @@ from typing import Any, Literal
 from deep_review.discovery import all_pages
 from deep_review.errors import WorkflowError
 from deep_review.infrastructure import AgentRunner, Commands
-from deep_review.models import AgentRole, DiscoveryResult, PullRequestTarget, SecondaryDecision
+from deep_review.models import DiscoveryResult, PullRequestTarget, SecondaryDecision
 
 SecondaryStatus = Literal["No issues found", "Done"]
 
@@ -47,8 +47,7 @@ def plan_reconciliation(
     roots = _reviewer_roots(_comments(target, commands), discovery.reviewer.username)
     decisions: list[SecondaryDecision] = []
     for root in roots:
-        decision = agents.run(
-            AgentRole.SECONDARY,
+        decision = agents.secondary(
             {
                 "issue": deepcopy(issue),
                 "jira_comments": deepcopy(jira_comments),
@@ -58,7 +57,6 @@ def plan_reconciliation(
                 "pull_request": target.model_dump(mode="json"),
                 "comment_thread": deepcopy(root),
             },
-            SecondaryDecision,
             repository_root,
         )
         if decision.comment_id != root.get("id"):

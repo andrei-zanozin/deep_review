@@ -36,7 +36,7 @@ class SecondaryCommands:
 
 
 class SecondaryAgent:
-    def run(self, *_: object, **__: object) -> SecondaryDecision:
+    def secondary(self, _: dict[str, Any], __: Path) -> SecondaryDecision:
         return SecondaryDecision(comment_id=7, action="resolve", evidence="The defect is fixed.")
 
 

@@ -17,7 +17,15 @@ from deep_review.infrastructure import (
     StrandsAgentRunner,
     _tool_value,
 )
-from deep_review.models import AgentRole, DiscoveryResult
+from deep_review.models import (
+    AgentRole,
+    ConsolidationResult,
+    DiscoveryResult,
+    LocationVerification,
+    ReviewResult,
+    SecondaryDecision,
+    TicketCorrelationResult,
+)
 
 
 class FakeHttpClient:
@@ -52,19 +60,37 @@ class FakeModel:
 
 
 class FakeResult:
-    structured_output = DiscoveryResult(
-        reviewer={"username": "reviewer"},
-        requestor={"username": "requestor"},
-        review_type="primary",
-    )
+    def __init__(self, structured_output: Any) -> None:
+        self.structured_output = structured_output
 
 
 class FakeAgent:
-    def __init__(self, **_: Any) -> None: ...
+    instances: list[dict[str, Any]] = []
 
-    async def invoke_async(self, *_: Any, **__: Any) -> FakeResult:
+    def __init__(self, **kwargs: Any) -> None:
+        self.instances.append(kwargs)
+
+    async def invoke_async(
+        self, *_: Any, structured_output_model: type[Any], **__: Any
+    ) -> FakeResult:
         await asyncio.sleep(0)
-        return FakeResult()
+        outputs = {
+            DiscoveryResult: DiscoveryResult(
+                reviewer={"username": "reviewer"},
+                requestor={"username": "requestor"},
+                review_type="primary",
+            ),
+            SecondaryDecision: SecondaryDecision(
+                comment_id=1,
+                action="resolve",
+                evidence="The defect is fixed.",
+            ),
+            ReviewResult: ReviewResult(status="no_issues", coverage=["reviewed"]),
+            ConsolidationResult: ConsolidationResult(selections=[]),
+            LocationVerification: LocationVerification(decisions=[]),
+            TicketCorrelationResult: TicketCorrelationResult(),
+        }
+        return FakeResult(outputs[structured_output_model])
 
 
 class FakeServers:
@@ -73,6 +99,19 @@ class FakeServers:
 
     def bitbucket(self, _: Any) -> object:
         return object()
+
+
+class CapturingServers:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, set[str]]] = []
+
+    def jira(self, allowed: set[str]) -> str:
+        self.calls.append(("jira", allowed))
+        return "jira-tools"
+
+    def bitbucket(self, allowed: set[str]) -> str:
+        self.calls.append(("bitbucket", allowed))
+        return "bitbucket-tools"
 
 
 def runtime_config() -> DeepReviewConfig:
@@ -148,6 +187,7 @@ def test_agent_invocations_own_distinct_direct_and_proxied_clients(
     FakeHttpClient.instances.clear()
     FakeOpenAIClient.instances.clear()
     FakeModel.instances.clear()
+    FakeAgent.instances.clear()
 
     monkeypatch.setattr(infrastructure.openai, "DefaultAsyncHttpxClient", FakeHttpClient)
     monkeypatch.setattr(infrastructure.openai, "AsyncOpenAI", FakeOpenAIClient)
@@ -161,12 +201,12 @@ def test_agent_invocations_own_distinct_direct_and_proxied_clients(
     with ThreadPoolExecutor(max_workers=2) as executor:
         results = list(
             executor.map(
-                lambda role: runner.run(role, {}, DiscoveryResult),
-                (AgentRole.ARCHITECTURE, AgentRole.UNIT),
+                lambda method: method({}, tmp_path),
+                (runner.architecture, runner.unit),
             )
         )
 
-    assert all(result.reviewer.username == "reviewer" for result in results)
+    assert all(result.status == "no_issues" for result in results)
     assert len({id(client) for client in FakeHttpClient.instances}) == 2
     assert all(client.kwargs["trust_env"] is False for client in FakeHttpClient.instances)
     assert all(client.kwargs["verify"] is False for client in FakeHttpClient.instances)
@@ -202,6 +242,52 @@ def test_agent_invocations_own_distinct_direct_and_proxied_clients(
         "Starting workflow step: Review architecture and design (agent: architecture)",
         "Starting workflow step: Review unit-level correctness (agent: unit)",
     }
+
+
+def test_agent_runners_expose_only_their_required_tools(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    FakeAgent.instances.clear()
+    FakeHttpClient.instances.clear()
+    FakeOpenAIClient.instances.clear()
+    FakeModel.instances.clear()
+    servers = CapturingServers()
+    monkeypatch.setattr(infrastructure.openai, "DefaultAsyncHttpxClient", FakeHttpClient)
+    monkeypatch.setattr(infrastructure.openai, "AsyncOpenAI", FakeOpenAIClient)
+    monkeypatch.setattr(infrastructure, "OpenAIModel", FakeModel)
+    monkeypatch.setattr(infrastructure, "Agent", FakeAgent)
+    monkeypatch.setattr(infrastructure, "repository_tools", lambda _: ["repository-tools"])
+    for role in AgentRole:
+        (tmp_path / f"{role.value}.md").write_text(role.value, encoding="utf-8")
+    runner = StrandsAgentRunner(runtime_config(), servers, tmp_path)  # type: ignore[arg-type]
+
+    runner.discovery({})
+    runner.secondary({}, tmp_path)
+    runner.architecture({}, tmp_path)
+    runner.unit({}, tmp_path)
+    runner.code_polish({}, tmp_path)
+    runner.consolidation({})
+    runner.location_verifier({}, tmp_path)
+    runner.ticket_correlation({})
+
+    assert [instance["system_prompt"] for instance in FakeAgent.instances] == [
+        role.value for role in AgentRole
+    ]
+    assert [instance["tools"] for instance in FakeAgent.instances] == [
+        [],
+        ["jira-tools", "repository-tools"],
+        ["repository-tools"],
+        ["repository-tools"],
+        ["repository-tools"],
+        [],
+        ["repository-tools"],
+        ["jira-tools", "bitbucket-tools"],
+    ]
+    assert servers.calls == [
+        ("jira", infrastructure.JIRA_READ_TOOLS),
+        ("jira", infrastructure.JIRA_READ_TOOLS),
+        ("bitbucket", infrastructure.BITBUCKET_READ_TOOLS),
+    ]
 
 
 def test_every_agent_role_has_a_user_friendly_step_name() -> None:

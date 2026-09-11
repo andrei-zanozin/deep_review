@@ -4,24 +4,31 @@ import asyncio
 import json
 import logging
 import uuid
-from contextlib import ExitStack
+from collections.abc import AsyncIterator
+from contextlib import ExitStack, asynccontextmanager
 from pathlib import Path
-from typing import Any, Protocol, TypeVar
+from typing import Any, Protocol
 
 import httpx
 import openai
 from mcp import StdioServerParameters, stdio_client
-from pydantic import BaseModel
 from strands import Agent
 from strands.models.openai import OpenAIModel
 from strands.tools.mcp import MCPClient
 
 from deep_review.configuration import DeepReviewConfig, McpConfig, McpServerConfig
 from deep_review.errors import WorkflowError
-from deep_review.models import AgentRole
+from deep_review.models import (
+    AgentRole,
+    ConsolidationResult,
+    DiscoveryResult,
+    LocationVerification,
+    ReviewResult,
+    SecondaryDecision,
+    TicketCorrelationResult,
+)
 from deep_review.repository import repository_tools
 
-Output = TypeVar("Output", bound=BaseModel)
 LOGGER = logging.getLogger(__name__)
 
 NO_API_KEY = "deep-review-no-api-key"
@@ -45,20 +52,6 @@ BITBUCKET_READ_TOOLS = {
     "get_pull_request_diff",
     "get_pull_request_comments",
 }
-JIRA_AGENT_ROLES = {
-    AgentRole.DISCOVERY,
-    AgentRole.SECONDARY,
-    AgentRole.ARCHITECTURE,
-    AgentRole.UNIT,
-    AgentRole.CODE_POLISH,
-    AgentRole.TICKET_CORRELATION,
-}
-BITBUCKET_AGENT_ROLES = JIRA_AGENT_ROLES | {
-    AgentRole.LOCATION_VERIFIER,
-    AgentRole.TICKET_CORRELATION,
-}
-
-
 class Commands(Protocol):
     def jira(self, name: str, arguments: dict[str, Any]) -> Any: ...
 
@@ -66,13 +59,29 @@ class Commands(Protocol):
 
 
 class AgentRunner(Protocol):
-    def run(
-        self,
-        role: AgentRole,
-        payload: dict[str, Any],
-        output_model: type[Output],
-        repository_root: Path | None = None,
-    ) -> Output: ...
+    def discovery(self, context: dict[str, Any]) -> DiscoveryResult: ...
+
+    def secondary(
+        self, context: dict[str, Any], repository_root: Path
+    ) -> SecondaryDecision: ...
+
+    def architecture(
+        self, context: dict[str, Any], repository_root: Path
+    ) -> ReviewResult: ...
+
+    def unit(self, context: dict[str, Any], repository_root: Path) -> ReviewResult: ...
+
+    def code_polish(
+        self, context: dict[str, Any], repository_root: Path
+    ) -> ReviewResult: ...
+
+    def consolidation(self, context: dict[str, Any]) -> ConsolidationResult: ...
+
+    def location_verifier(
+        self, context: dict[str, Any], repository_root: Path
+    ) -> LocationVerification: ...
+
+    def ticket_correlation(self, context: dict[str, Any]) -> TicketCorrelationResult: ...
 
 
 class ServerFactory:
@@ -169,22 +178,240 @@ class StrandsAgentRunner:
         self.servers = servers
         self.prompts = prompts
 
-    def run(
-        self,
-        role: AgentRole,
-        payload: dict[str, Any],
-        output_model: type[Output],
-        repository_root: Path | None = None,
-    ) -> Output:
-        return asyncio.run(self._run_async(role, payload, output_model, repository_root))
+    def discovery(self, context: dict[str, Any]) -> DiscoveryResult:
+        async def invoke() -> DiscoveryResult:
+            role = AgentRole.DISCOVERY
+            async with self._model(role) as model:
+                agent = Agent(
+                    model=model,
+                    system_prompt=self._prompt(role),
+                    tools=[],
+                    callback_handler=None,
+                )
+                try:
+                    LOGGER.info(
+                        "Starting workflow step: %s (agent: %s)",
+                        AGENT_STEP_NAMES[role],
+                        role.value,
+                    )
+                    result = await agent.invoke_async(
+                        json.dumps(context, default=str, ensure_ascii=False),
+                        structured_output_model=DiscoveryResult,
+                    )
+                except Exception as exc:
+                    raise WorkflowError(f"{role.value} agent failed: {exc}") from exc
+                if result.structured_output is None:
+                    raise WorkflowError(f"{role.value} agent returned no structured output")
+                return result.structured_output
 
-    async def _run_async(
-        self,
-        role: AgentRole,
-        payload: dict[str, Any],
-        output_model: type[Output],
-        repository_root: Path | None,
-    ) -> Output:
+        return asyncio.run(invoke())
+
+    def secondary(self, context: dict[str, Any], repository_root: Path) -> SecondaryDecision:
+        async def invoke() -> SecondaryDecision:
+            role = AgentRole.SECONDARY
+            async with self._model(role) as model:
+                agent = Agent(
+                    model=model,
+                    system_prompt=self._prompt(role),
+                    tools=[
+                        self.servers.jira(JIRA_READ_TOOLS),
+                        *repository_tools(repository_root),
+                    ],
+                    callback_handler=None,
+                )
+                try:
+                    LOGGER.info(
+                        "Starting workflow step: %s (agent: %s)",
+                        AGENT_STEP_NAMES[role],
+                        role.value,
+                    )
+                    result = await agent.invoke_async(
+                        json.dumps(context, default=str, ensure_ascii=False),
+                        structured_output_model=SecondaryDecision,
+                    )
+                except Exception as exc:
+                    raise WorkflowError(f"{role.value} agent failed: {exc}") from exc
+                if result.structured_output is None:
+                    raise WorkflowError(f"{role.value} agent returned no structured output")
+                return result.structured_output
+
+        return asyncio.run(invoke())
+
+    def architecture(self, context: dict[str, Any], repository_root: Path) -> ReviewResult:
+        async def invoke() -> ReviewResult:
+            role = AgentRole.ARCHITECTURE
+            async with self._model(role) as model:
+                agent = Agent(
+                    model=model,
+                    system_prompt=self._prompt(role),
+                    tools=repository_tools(repository_root),
+                    callback_handler=None,
+                )
+                try:
+                    LOGGER.info(
+                        "Starting workflow step: %s (agent: %s)",
+                        AGENT_STEP_NAMES[role],
+                        role.value,
+                    )
+                    result = await agent.invoke_async(
+                        json.dumps(context, default=str, ensure_ascii=False),
+                        structured_output_model=ReviewResult,
+                    )
+                except Exception as exc:
+                    raise WorkflowError(f"{role.value} agent failed: {exc}") from exc
+                if result.structured_output is None:
+                    raise WorkflowError(f"{role.value} agent returned no structured output")
+                return result.structured_output
+
+        return asyncio.run(invoke())
+
+    def unit(self, context: dict[str, Any], repository_root: Path) -> ReviewResult:
+        async def invoke() -> ReviewResult:
+            role = AgentRole.UNIT
+            async with self._model(role) as model:
+                agent = Agent(
+                    model=model,
+                    system_prompt=self._prompt(role),
+                    tools=repository_tools(repository_root),
+                    callback_handler=None,
+                )
+                try:
+                    LOGGER.info(
+                        "Starting workflow step: %s (agent: %s)",
+                        AGENT_STEP_NAMES[role],
+                        role.value,
+                    )
+                    result = await agent.invoke_async(
+                        json.dumps(context, default=str, ensure_ascii=False),
+                        structured_output_model=ReviewResult,
+                    )
+                except Exception as exc:
+                    raise WorkflowError(f"{role.value} agent failed: {exc}") from exc
+                if result.structured_output is None:
+                    raise WorkflowError(f"{role.value} agent returned no structured output")
+                return result.structured_output
+
+        return asyncio.run(invoke())
+
+    def code_polish(self, context: dict[str, Any], repository_root: Path) -> ReviewResult:
+        async def invoke() -> ReviewResult:
+            role = AgentRole.CODE_POLISH
+            async with self._model(role) as model:
+                agent = Agent(
+                    model=model,
+                    system_prompt=self._prompt(role),
+                    tools=repository_tools(repository_root),
+                    callback_handler=None,
+                )
+                try:
+                    LOGGER.info(
+                        "Starting workflow step: %s (agent: %s)",
+                        AGENT_STEP_NAMES[role],
+                        role.value,
+                    )
+                    result = await agent.invoke_async(
+                        json.dumps(context, default=str, ensure_ascii=False),
+                        structured_output_model=ReviewResult,
+                    )
+                except Exception as exc:
+                    raise WorkflowError(f"{role.value} agent failed: {exc}") from exc
+                if result.structured_output is None:
+                    raise WorkflowError(f"{role.value} agent returned no structured output")
+                return result.structured_output
+
+        return asyncio.run(invoke())
+
+    def consolidation(self, context: dict[str, Any]) -> ConsolidationResult:
+        async def invoke() -> ConsolidationResult:
+            role = AgentRole.CONSOLIDATION
+            async with self._model(role) as model:
+                agent = Agent(
+                    model=model,
+                    system_prompt=self._prompt(role),
+                    tools=[],
+                    callback_handler=None,
+                )
+                try:
+                    LOGGER.info(
+                        "Starting workflow step: %s (agent: %s)",
+                        AGENT_STEP_NAMES[role],
+                        role.value,
+                    )
+                    result = await agent.invoke_async(
+                        json.dumps(context, default=str, ensure_ascii=False),
+                        structured_output_model=ConsolidationResult,
+                    )
+                except Exception as exc:
+                    raise WorkflowError(f"{role.value} agent failed: {exc}") from exc
+                if result.structured_output is None:
+                    raise WorkflowError(f"{role.value} agent returned no structured output")
+                return result.structured_output
+
+        return asyncio.run(invoke())
+
+    def location_verifier(
+        self, context: dict[str, Any], repository_root: Path
+    ) -> LocationVerification:
+        async def invoke() -> LocationVerification:
+            role = AgentRole.LOCATION_VERIFIER
+            async with self._model(role) as model:
+                agent = Agent(
+                    model=model,
+                    system_prompt=self._prompt(role),
+                    tools=repository_tools(repository_root),
+                    callback_handler=None,
+                )
+                try:
+                    LOGGER.info(
+                        "Starting workflow step: %s (agent: %s)",
+                        AGENT_STEP_NAMES[role],
+                        role.value,
+                    )
+                    result = await agent.invoke_async(
+                        json.dumps(context, default=str, ensure_ascii=False),
+                        structured_output_model=LocationVerification,
+                    )
+                except Exception as exc:
+                    raise WorkflowError(f"{role.value} agent failed: {exc}") from exc
+                if result.structured_output is None:
+                    raise WorkflowError(f"{role.value} agent returned no structured output")
+                return result.structured_output
+
+        return asyncio.run(invoke())
+
+    def ticket_correlation(self, context: dict[str, Any]) -> TicketCorrelationResult:
+        async def invoke() -> TicketCorrelationResult:
+            role = AgentRole.TICKET_CORRELATION
+            async with self._model(role) as model:
+                agent = Agent(
+                    model=model,
+                    system_prompt=self._prompt(role),
+                    tools=[
+                        self.servers.jira(JIRA_READ_TOOLS),
+                        self.servers.bitbucket(BITBUCKET_READ_TOOLS),
+                    ],
+                    callback_handler=None,
+                )
+                try:
+                    LOGGER.info(
+                        "Starting workflow step: %s (agent: %s)",
+                        AGENT_STEP_NAMES[role],
+                        role.value,
+                    )
+                    result = await agent.invoke_async(
+                        json.dumps(context, default=str, ensure_ascii=False),
+                        structured_output_model=TicketCorrelationResult,
+                    )
+                except Exception as exc:
+                    raise WorkflowError(f"{role.value} agent failed: {exc}") from exc
+                if result.structured_output is None:
+                    raise WorkflowError(f"{role.value} agent returned no structured output")
+                return result.structured_output
+
+        return asyncio.run(invoke())
+
+    @asynccontextmanager
+    async def _model(self, role: AgentRole) -> AsyncIterator[OpenAIModel]:
         spec = self.config.resolve(role)
         proxy = None
         if spec.use_proxy:
@@ -221,51 +448,12 @@ class StrandsAgentRunner:
                 model_id=llm.model_id,
                 params=dict(llm.parameters),
             )
-            return await self._invoke_agent(
-                role, payload, output_model, repository_root, model
-            )
+            yield model
         finally:
             try:
                 await openai_client.close()
             finally:
                 await http_client.aclose()
-
-    async def _invoke_agent(
-        self,
-        role: AgentRole,
-        payload: dict[str, Any],
-        output_model: type[Output],
-        repository_root: Path | None,
-        model: OpenAIModel,
-    ) -> Output:
-        providers: list[Any] = []
-        if role in JIRA_AGENT_ROLES:
-            providers.append(self.servers.jira(JIRA_READ_TOOLS))
-        if role in BITBUCKET_AGENT_ROLES:
-            providers.append(self.servers.bitbucket(BITBUCKET_READ_TOOLS))
-        if repository_root is not None:
-            providers.extend(repository_tools(repository_root))
-        agent = Agent(
-            model=model,
-            system_prompt=self._prompt(role),
-            tools=providers,
-            callback_handler=None,
-        )
-        try:
-            LOGGER.info(
-                "Starting workflow step: %s (agent: %s)",
-                AGENT_STEP_NAMES[role],
-                role.value,
-            )
-            result = await agent.invoke_async(
-                json.dumps(payload, default=str, ensure_ascii=False),
-                structured_output_model=output_model,
-            )
-        except Exception as exc:
-            raise WorkflowError(f"{role.value} agent failed: {exc}") from exc
-        if result.structured_output is None:
-            raise WorkflowError(f"{role.value} agent returned no structured output")
-        return result.structured_output
 
     def _prompt(self, role: AgentRole) -> str:
         path = self.prompts / f"{role.value}.md"

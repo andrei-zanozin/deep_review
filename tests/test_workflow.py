@@ -11,6 +11,7 @@ from deep_review.models import (
     DiscoveryResult,
     LocationVerification,
     ReviewResult,
+    SecondaryDecision,
     TicketCorrelationResult,
 )
 from deep_review.workflow import execute_review
@@ -68,58 +69,74 @@ class FakeAgents:
         self.has_finding = has_finding
         self.roles: list[AgentRole] = []
 
-    def run(self, role: AgentRole, *_: object, **__: object) -> Any:
-        self.roles.append(role)
-        if role == AgentRole.DISCOVERY:
-            return DiscoveryResult(
-                reviewer={"username": "reviewer"},
-                requestor={"username": "requestor"},
-                review_type="primary",
-            )
-        if role in {AgentRole.UNIT, AgentRole.CODE_POLISH}:
-            return ReviewResult(status="no_issues", coverage=[role.value])
-        if role == AgentRole.ARCHITECTURE:
-            if not self.has_finding:
-                return ReviewResult(status="no_issues", coverage=[role.value])
-            return ReviewResult(
-                status="findings",
-                coverage=[role.value],
-                findings=[
-                    {
-                        "severity": "Major",
-                        "title": "Bad added value",
-                        "path": "code.txt",
-                        "line": 2,
-                        "side": "destination",
-                        "problem_and_impact": "The value breaks the required behavior.",
-                        "suggested_fix": "Use the required value.",
-                        "evidence": "The added line contains the invalid value.",
-                    }
-                ],
-            )
-        if role == AgentRole.CONSOLIDATION:
-            return ConsolidationResult(
-                selections=[
-                    {
-                        "selected_id": "architecture:1",
-                        "duplicate_ids": [],
-                        "severity": "Major",
-                    }
-                ]
-            )
-        if role == AgentRole.LOCATION_VERIFIER:
-            return LocationVerification(
-                decisions=[
-                    {
-                        "finding_id": "architecture:1",
-                        "valid": True,
-                        "reason": "The destination line contains the described value.",
-                    }
-                ]
-            )
-        if role == AgentRole.TICKET_CORRELATION:
-            return TicketCorrelationResult()
-        raise AssertionError(role)
+    def discovery(self, _: dict[str, Any]) -> DiscoveryResult:
+        self.roles.append(AgentRole.DISCOVERY)
+        return DiscoveryResult(
+            reviewer={"username": "reviewer"},
+            requestor={"username": "requestor"},
+            review_type="primary",
+        )
+
+    def secondary(self, _: dict[str, Any], __: Path) -> SecondaryDecision:
+        self.roles.append(AgentRole.SECONDARY)
+        return SecondaryDecision(comment_id=1, action="resolve", evidence="Fixed.")
+
+    def architecture(self, _: dict[str, Any], __: Path) -> ReviewResult:
+        self.roles.append(AgentRole.ARCHITECTURE)
+        if not self.has_finding:
+            return ReviewResult(status="no_issues", coverage=["architecture"])
+        return ReviewResult(
+            status="findings",
+            coverage=["architecture"],
+            findings=[
+                {
+                    "severity": "Major",
+                    "title": "Bad added value",
+                    "path": "code.txt",
+                    "line": 2,
+                    "side": "destination",
+                    "problem_and_impact": "The value breaks the required behavior.",
+                    "suggested_fix": "Use the required value.",
+                    "evidence": "The added line contains the invalid value.",
+                }
+            ],
+        )
+
+    def unit(self, _: dict[str, Any], __: Path) -> ReviewResult:
+        self.roles.append(AgentRole.UNIT)
+        return ReviewResult(status="no_issues", coverage=["unit"])
+
+    def code_polish(self, _: dict[str, Any], __: Path) -> ReviewResult:
+        self.roles.append(AgentRole.CODE_POLISH)
+        return ReviewResult(status="no_issues", coverage=["code_polish"])
+
+    def consolidation(self, _: dict[str, Any]) -> ConsolidationResult:
+        self.roles.append(AgentRole.CONSOLIDATION)
+        return ConsolidationResult(
+            selections=[
+                {
+                    "selected_id": "architecture:1",
+                    "duplicate_ids": [],
+                    "severity": "Major",
+                }
+            ]
+        )
+
+    def location_verifier(self, _: dict[str, Any], __: Path) -> LocationVerification:
+        self.roles.append(AgentRole.LOCATION_VERIFIER)
+        return LocationVerification(
+            decisions=[
+                {
+                    "finding_id": "architecture:1",
+                    "valid": True,
+                    "reason": "The destination line contains the described value.",
+                }
+            ]
+        )
+
+    def ticket_correlation(self, _: dict[str, Any]) -> TicketCorrelationResult:
+        self.roles.append(AgentRole.TICKET_CORRELATION)
+        return TicketCorrelationResult()
 
 
 def test_primary_no_issues_approves_and_finishes_jira(git_repository: Path) -> None:
@@ -231,9 +248,9 @@ class CapturingAgents(FakeAgents):
         super().__init__(False)
         self.payloads: dict[AgentRole, list[dict[str, Any]]] = {}
 
-    def run(self, role: AgentRole, payload: dict[str, Any], *args: object, **kwargs: object) -> Any:
-        self.payloads.setdefault(role, []).append(payload)
-        return super().run(role, payload, *args, **kwargs)
+    def ticket_correlation(self, payload: dict[str, Any]) -> TicketCorrelationResult:
+        self.payloads.setdefault(AgentRole.TICKET_CORRELATION, []).append(payload)
+        return super().ticket_correlation(payload)
 
 
 def create_repository(path: Path, repository: str) -> str:

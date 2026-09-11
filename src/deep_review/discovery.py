@@ -6,7 +6,6 @@ from typing import Any
 from deep_review.errors import WorkflowError
 from deep_review.infrastructure import AgentRunner, Commands
 from deep_review.models import (
-    AgentRole,
     DiscoveryResult,
     PrReviewContext,
     PullRequestTarget,
@@ -29,11 +28,7 @@ def discover(
         ),
         "comments",
     )
-    result = agents.run(
-        AgentRole.DISCOVERY,
-        {"issue": issue, "comments": comments},
-        DiscoveryResult,
-    )
+    result = agents.discovery({"issue": issue, "comments": comments})
     _validate_people(issue, comments, result)
     return repository, issue, comments, result
 
