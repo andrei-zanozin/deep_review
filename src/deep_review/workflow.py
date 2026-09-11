@@ -32,6 +32,7 @@ from deep_review.repository import (
     pull_request_diff,
 )
 from deep_review.review import consolidate, run_specialists, validate_cross_prs
+from deep_review.usage import UsageCollector
 
 LOGGER = logging.getLogger(__name__)
 
@@ -41,9 +42,13 @@ def run_review(issue: str) -> TicketReviewContext:
     config_path = project_config_path()
     config = load_config(config_path)
     servers = McpFactory(config.mcp, config_path.parent)
-    agents = runtime_agent_runner(config, servers)
-    with McpCommands(servers) as commands:
-        return execute_review(issue, Path.cwd(), commands, agents)
+    usage = UsageCollector()
+    agents = runtime_agent_runner(config, servers, usage)
+    try:
+        with McpCommands(servers) as commands:
+            return execute_review(issue, Path.cwd(), commands, agents)
+    finally:
+        usage.log_summary()
 
 
 def execute_review(

@@ -210,3 +210,55 @@ agents:
         assert inherited.use_proxy is False
         assert inherited.llm.model_id == "root-model"
         assert inherited.llm.parameters == {"temperature": 0, "max_tokens": 1000}
+
+
+def test_pricing_inherits_only_when_the_effective_model_is_unchanged(tmp_path: Path) -> None:
+    source = BASE_CONFIG.replace(
+        "  parameters:\n",
+        "  pricing:\n"
+        "    input_usd_per_million_tokens: \"1.00\"\n"
+        "    output_usd_per_million_tokens: \"4.00\"\n"
+        "  parameters:\n",
+    ) + """
+agents:
+  discovery:
+    llm:
+      parameters:
+        max_tokens: 500
+  architecture_expert:
+    llm:
+      model_id: specialist-model
+  implementation_expert:
+    llm:
+      model_id: root-model
+      pricing: null
+  code_polish_expert:
+    llm:
+      model_id: specialist-model
+      pricing:
+        input_usd_per_million_tokens: "2.00"
+        output_usd_per_million_tokens: "8.00"
+"""
+    config = load_config(
+        write_config(tmp_path, source),
+        {"JIRA_PAT": "jira", "LLM_KEY": "root-key"},
+    )
+
+    assert config.resolve(AgentRole.DISCOVERY).llm.pricing is not None
+    assert config.resolve(AgentRole.ARCHITECTURE_EXPERT).llm.pricing is None
+    assert config.resolve(AgentRole.IMPLEMENTATION_EXPERT).llm.pricing is None
+    pricing = config.resolve(AgentRole.CODE_POLISH_EXPERT).llm.pricing
+    assert pricing is not None
+    assert str(pricing.output_usd_per_million_tokens) == "8.00"
+
+
+def test_rejects_negative_pricing_rate(tmp_path: Path) -> None:
+    source = BASE_CONFIG.replace(
+        "  parameters:\n",
+        "  pricing:\n"
+        "    input_usd_per_million_tokens: -1\n"
+        "    output_usd_per_million_tokens: 1\n"
+        "  parameters:\n",
+    )
+    with pytest.raises(ConfigurationError, match="greater than or equal to 0"):
+        load_config(write_config(tmp_path, source), {"JIRA_PAT": "jira", "LLM_KEY": "key"})

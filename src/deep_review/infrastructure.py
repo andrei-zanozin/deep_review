@@ -36,6 +36,7 @@ from deep_review.models import (
     ReviewResult,
 )
 from deep_review.repository import repository_tools
+from deep_review.usage import UsageCollector, UsageTrackingHooks
 
 LOGGER = logging.getLogger(__name__)
 
@@ -274,10 +275,12 @@ class StrandsAgentRunner:
         config: DeepReviewConfig,
         servers: McpFactory,
         prompts: Path,
+        usage: UsageCollector | None = None,
     ) -> None:
         self.config = config
         self.servers = servers
         self.prompts = prompts
+        self.usage = usage or UsageCollector()
 
     def discovery(self, context: dict[str, Any]) -> DiscoveryResult:
         async def invoke() -> DiscoveryResult:
@@ -540,8 +543,12 @@ class StrandsAgentRunner:
             finally:
                 await http_client.aclose()
 
-    def _logging_hooks(self, role: AgentRole) -> list[ApiCallLoggingHooks]:
-        return [ApiCallLoggingHooks(role, self.config.resolve(role).llm.model_id)]
+    def _logging_hooks(self, role: AgentRole) -> list[object]:
+        llm = self.config.resolve(role).llm
+        return [
+            ApiCallLoggingHooks(role, llm.model_id),
+            UsageTrackingHooks(self.usage, llm.model_id, llm.pricing),
+        ]
 
     def _prompt(self, role: AgentRole) -> str:
         path = self.prompts / f"{role.value}.md"
@@ -561,12 +568,13 @@ def _log_finished_step(role: AgentRole, issues_found: int | None = None) -> None
 
 
 def runtime_agent_runner(
-    config: DeepReviewConfig, servers: McpFactory
+    config: DeepReviewConfig, servers: McpFactory, usage: UsageCollector | None = None
 ) -> StrandsAgentRunner:
     return StrandsAgentRunner(
         config=config,
         servers=servers,
         prompts=Path(__file__).with_name("prompts"),
+        usage=usage,
     )
 
 

@@ -33,6 +33,11 @@ llm:
   base_url: "${DEEP_REVIEW_OPENAI_BASE_URL}"
   api_key: "${DEEP_REVIEW_OPENAI_API_KEY}"
   model_id: "default-model"
+  # Optional USD per one million tokens. These rates are operator-maintained.
+  # pricing:
+  #   input_usd_per_million_tokens: "1.00"
+  #   output_usd_per_million_tokens: "4.00"
+  #   cache_read_input_usd_per_million_tokens: "0.25"
   parameters:
     temperature: 0
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import re
 from collections.abc import Mapping
+from decimal import Decimal
 from pathlib import Path
 from typing import Annotated, Any
 
@@ -44,11 +45,18 @@ class McpConfig(StrictConfigurationModel):
     bitbucket: McpServerConfig
 
 
+class TokenPricing(StrictConfigurationModel):
+    input_usd_per_million_tokens: Decimal = Field(ge=0)
+    output_usd_per_million_tokens: Decimal = Field(ge=0)
+    cache_read_input_usd_per_million_tokens: Decimal | None = Field(default=None, ge=0)
+
+
 class LlmConfig(StrictConfigurationModel):
     base_url: AnyHttpUrl
     api_key: SecretStr | None = None
     model_id: NonEmptyString
     parameters: dict[str, Any] = Field(default_factory=lambda: {"temperature": 0})
+    pricing: TokenPricing | None = None
 
     def model_post_init(self, __context: Any) -> None:
         if self.api_key is not None and not self.api_key.get_secret_value().strip():
@@ -60,6 +68,7 @@ class AgentLlmConfig(StrictConfigurationModel):
     api_key: SecretStr | None = None
     model_id: NonEmptyString | None = None
     parameters: dict[str, Any] = Field(default_factory=dict)
+    pricing: TokenPricing | None = None
 
     def model_post_init(self, __context: Any) -> None:
         for field in ("base_url", "model_id"):
@@ -97,6 +106,7 @@ class DeepReviewConfig(StrictConfigurationModel):
             "api_key": self.llm.api_key,
             "model_id": self.llm.model_id,
             "parameters": dict(self.llm.parameters),
+            "pricing": self.llm.pricing,
         }
         override = agent.llm
         if override is not None:
@@ -104,6 +114,10 @@ class DeepReviewConfig(StrictConfigurationModel):
                 if field in override.model_fields_set:
                     values[field] = getattr(override, field)
             values["parameters"].update(override.parameters)
+            if "pricing" in override.model_fields_set:
+                values["pricing"] = override.pricing
+            elif values["model_id"] != self.llm.model_id:
+                values["pricing"] = None
         return EffectiveAgentConfig(use_proxy=agent.use_proxy, llm=LlmConfig(**values))
 
 

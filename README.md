@@ -25,6 +25,23 @@ Agent entries are optional. An unlisted role inherits the root LLM and defaults 
 An agent LLM overrides only fields written in that entry, and its `parameters` map is shallow-merged
 over the root parameters. Setting `api_key: null` explicitly removes the inherited key.
 
+Token pricing is optional and belongs to the relevant `llm` block. Prices are expressed in USD per
+one million tokens. A role that retains the root `model_id` inherits its price; a role that changes
+the model without defining `pricing` reports tokens but no cost. Set `pricing: null` to explicitly
+disable inherited pricing.
+
+```yaml
+llm:
+  model_id: "review-model"
+  pricing:
+    input_usd_per_million_tokens: "1.00"
+    output_usd_per_million_tokens: "4.00"
+    cache_read_input_usd_per_million_tokens: "0.25"
+```
+
+At the end of a run, the console shows reported token usage per model and in total. Costs appear
+only when every required price is configured; no cost estimate is generated for unavailable usage.
+
 For example, an OpenAI-compatible local endpoint that requires no authentication can be configured
 for one role as follows:
 

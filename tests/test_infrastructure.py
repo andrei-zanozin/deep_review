@@ -29,6 +29,7 @@ from deep_review.models import (
     FixVerifierDecision,
     ReviewResult,
 )
+from deep_review.usage import UsageTrackingHooks
 
 
 class FakeHttpClient:
@@ -290,8 +291,9 @@ def test_agent_runners_expose_only_their_required_tools(
         ["jira-tools", "bitbucket-tools"],
     ]
     assert all(
-        len(instance["hooks"]) == 1
+        len(instance["hooks"]) == 2
         and isinstance(instance["hooks"][0], ApiCallLoggingHooks)
+        and isinstance(instance["hooks"][1], UsageTrackingHooks)
         for instance in FakeAgent.instances
     )
     assert servers.calls == [
