@@ -52,6 +52,28 @@ def execute_review(
     commands: Commands,
     agents: AgentRunner,
 ) -> TicketReviewContext:
+    context, discovery = _initialize_review(issue_key, start, commands, agents)
+    repositories = discover_sibling_repositories(start)
+
+    _review_pull_requests(context, discovery, repositories, commands, agents)
+    _apply_cross_pr_validator(context, agents)
+    published_pull_requests = _publish_pull_requests_findings(
+        context,
+        discovery,
+        commands,
+        agents,
+    )
+
+    _finish_review(context, published_pull_requests, commands)
+    return context
+
+
+def _initialize_review(
+    issue_key: str,
+    start: Path,
+    commands: Commands,
+    agents: AgentRunner,
+) -> tuple[TicketReviewContext, DiscoveryResult]:
     _, issue, jira_comments, discovery = discover(issue_key, start, commands, agents)
     context = TicketReviewContext(
         issue_key=issue_key,
@@ -65,28 +87,38 @@ def execute_review(
     LOGGER.info("review targets discovered: %d", len(context.pull_requests))
     if not context.pull_requests:
         context.failures.append("no matching OPEN pull requests were found")
+    return context, discovery
 
-    repositories = discover_sibling_repositories(start)
-    _prepare_pull_requests(context, discovery, repositories, commands, agents)
-    _apply_cross_pr_validator(context, agents)
-    published = _publish_pull_requests(context, discovery, commands, agents)
 
+def _finish_review(
+    context: TicketReviewContext,
+    published_pull_requests: list[str],
+    commands: Commands,
+) -> None:
     if context.failures:
-        context.status = "partial" if published else "failed"
-        report_incomplete_jira(issue_key, published, context.failures, commands)
+        context.status = "partial" if published_pull_requests else "failed"
+        report_incomplete_jira(
+            context.issue_key,
+            published_pull_requests,
+            context.failures,
+            commands,
+        )
     else:
         context.status = "complete"
         finish_jira(
-            issue_key,
+            context.issue_key,
             context.requestor.username,
             any(item.issues_found for item in context.pull_requests),
             commands,
         )
-    LOGGER.info("deep review completed for %s with status %s", issue_key, context.status)
-    return context
+    LOGGER.info(
+        "deep review completed for %s with status %s",
+        context.issue_key,
+        context.status,
+    )
 
 
-def _prepare_pull_requests(
+def _review_pull_requests(
     context: TicketReviewContext,
     discovery: DiscoveryResult,
     repositories: dict[tuple[str, str], RepositoryIdentity],
@@ -100,68 +132,96 @@ def _prepare_pull_requests(
         )
         repository = repositories.get(identity)
         if repository is None:
-            available = ", ".join(
-                f"{candidate.project}/{candidate.repository} at {candidate.root}"
-                for candidate in sorted(
-                    repositories.values(),
-                    key=lambda item: (
-                        *_repository_identity_key(item.project, item.repository),
-                        item.root,
-                    ),
-                )
-            )
-            LOGGER.warning(
-                "local checkout lookup failed for PR %s: expected identity=%s/%s; "
-                "discovered repositories=%s; see repository discovery logs for skipped or "
-                "ambiguous candidates",
-                _pull_request_label(pull_request),
-                pull_request.key.project,
-                pull_request.key.repository,
-                available or "none",
-            )
-            _fail_pull_request(
-                context,
-                pull_request,
-                "local sibling checkout is unavailable or ambiguous",
-                "skipped",
-            )
+            _skip_pull_request_without_repository(context, pull_request, repositories)
             continue
-        pull_request.repository = repository
         try:
-            prepare_checkout(repository.root, pull_request.target)
-            pull_request.diff = pull_request_diff(repository.root, pull_request.target)
-            pull_request.status = "prepared"
-            if pull_request.mode == "evidence_only":
-                continue
-
-            if context.review_type == ReviewType.FIX_VERIFIER:
-                decisions, existing = plan_reconciliation(
-                    context.issue,
-                    context.jira_comments,
-                    pull_request.diff,
-                    discovery,
-                    pull_request.target,
-                    repository.root,
-                    commands,
-                    agents,
-                )
-                pull_request.fix_verifier_decisions = decisions
-                pull_request.existing_reviewer_comments = existing
-
-            results, candidates = run_specialists(
-                context.issue,
-                context.jira_comments,
-                pull_request.diff,
-                pull_request.target,
-                repository.root,
+            _review_pull_request(
+                context,
+                discovery,
+                pull_request,
+                repository,
+                commands,
                 agents,
                 related,
             )
-            pull_request.specialist_results = results
-            pull_request.candidates = candidates
-            pull_request.status = "reviewed"
         except WorkflowError as exc:
             _fail_pull_request(context, pull_request, str(exc), "failed")
+
+
+def _skip_pull_request_without_repository(
+    context: TicketReviewContext,
+    pull_request: PrReviewContext,
+    repositories: dict[tuple[str, str], RepositoryIdentity],
+) -> None:
+    available = ", ".join(
+        f"{candidate.project}/{candidate.repository} at {candidate.root}"
+        for candidate in sorted(
+            repositories.values(),
+            key=lambda item: (
+                *_repository_identity_key(item.project, item.repository),
+                item.root,
+            ),
+        )
+    )
+    LOGGER.warning(
+        "local checkout lookup failed for PR %s: expected identity=%s/%s; "
+        "discovered repositories=%s; see repository discovery logs for skipped or ambiguous "
+        "candidates",
+        _pull_request_label(pull_request),
+        pull_request.key.project,
+        pull_request.key.repository,
+        available or "none",
+    )
+    _fail_pull_request(
+        context,
+        pull_request,
+        "local sibling checkout is unavailable or ambiguous",
+        "skipped",
+    )
+
+
+def _review_pull_request(
+    context: TicketReviewContext,
+    discovery: DiscoveryResult,
+    pull_request: PrReviewContext,
+    repository: RepositoryIdentity,
+    commands: Commands,
+    agents: AgentRunner,
+    related_pull_requests: list[dict[str, object]],
+) -> None:
+    pull_request.repository = repository
+    prepare_checkout(repository.root, pull_request.target)
+    pull_request.diff = pull_request_diff(repository.root, pull_request.target)
+    pull_request.status = "prepared"
+    if pull_request.mode == "evidence_only":
+        return
+
+    if context.review_type == ReviewType.FIX_VERIFIER:
+        decisions, existing_comments = plan_reconciliation(
+            context.issue,
+            context.jira_comments,
+            pull_request.diff,
+            discovery,
+            pull_request.target,
+            repository.root,
+            commands,
+            agents,
+        )
+        pull_request.fix_verifier_decisions = decisions
+        pull_request.existing_reviewer_comments = existing_comments
+
+    results, candidates = run_specialists(
+        context.issue,
+        context.jira_comments,
+        pull_request.diff,
+        pull_request.target,
+        repository.root,
+        agents,
+        related_pull_requests,
+    )
+    pull_request.specialist_results = results
+    pull_request.candidates = candidates
+    pull_request.status = "reviewed"
 
 
 def _related_pull_request(context: PrReviewContext) -> dict[str, object]:
@@ -194,7 +254,7 @@ def _apply_cross_pr_validator(
         context.failures.append(f"ticket correlation failed: {exc}")
 
 
-def _publish_pull_requests(
+def _publish_pull_requests_findings(
     context: TicketReviewContext,
     discovery: DiscoveryResult,
     commands: Commands,
@@ -204,33 +264,13 @@ def _publish_pull_requests(
         if pull_request.status != "reviewed":
             continue
         try:
-            if pull_request.repository is None:
-                raise WorkflowError("reviewed pull request has no local repository")
-            pull_request.findings = consolidate(
-                pull_request.candidates,
-                pull_request.existing_reviewer_comments,
+            _publish_pull_request_findings(
+                context,
+                discovery,
+                pull_request,
+                commands,
                 agents,
             )
-            LOGGER.info(
-                "new consolidated findings for PR %s: %d",
-                _pull_request_label(pull_request),
-                len(pull_request.findings),
-            )
-            issues_found, fix_verifier_status = publish(
-                pull_request.target,
-                pull_request.findings,
-                None,
-                pull_request.diff or "No changes.",
-                pull_request.repository.root,
-                commands,
-                pull_request.fix_verifier_decisions
-                if context.review_type == ReviewType.FIX_VERIFIER
-                else None,
-                discovery,
-            )
-            pull_request.issues_found = issues_found
-            pull_request.fix_verifier_status = fix_verifier_status
-            pull_request.status = "published"
         except WorkflowError as exc:
             _fail_pull_request(context, pull_request, str(exc), "failed")
     return [
@@ -238,6 +278,45 @@ def _publish_pull_requests(
         for item in context.pull_requests
         if item.status == "published"
     ]
+
+
+def _publish_pull_request_findings(
+    context: TicketReviewContext,
+    discovery: DiscoveryResult,
+    pull_request: PrReviewContext,
+    commands: Commands,
+    agents: AgentRunner,
+) -> None:
+    if pull_request.repository is None:
+        raise WorkflowError("reviewed pull request has no local repository")
+
+    pull_request.findings = consolidate(
+        pull_request.candidates,
+        pull_request.existing_reviewer_comments,
+        agents,
+    )
+    LOGGER.info(
+        "new consolidated findings for PR %s: %d",
+        _pull_request_label(pull_request),
+        len(pull_request.findings),
+    )
+    issues_found, fix_verifier_status = publish(
+        pull_request.target,
+        pull_request.findings,
+        None,
+        pull_request.diff or "No changes.",
+        pull_request.repository.root,
+        commands,
+        fix_verifier_decisions=(
+            pull_request.fix_verifier_decisions
+            if context.review_type == ReviewType.FIX_VERIFIER
+            else None
+        ),
+        discovery=discovery,
+    )
+    pull_request.issues_found = issues_found
+    pull_request.fix_verifier_status = fix_verifier_status
+    pull_request.status = "published"
 
 
 def _pull_request_label(context: PrReviewContext) -> str:
