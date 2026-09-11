@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 import uuid
 from collections.abc import AsyncIterator
 from contextlib import ExitStack, asynccontextmanager
@@ -13,11 +14,19 @@ import httpx
 import openai
 from mcp import StdioServerParameters, stdio_client
 from strands import Agent
+from strands.hooks import (
+    AfterModelCallEvent,
+    AfterToolCallEvent,
+    BeforeModelCallEvent,
+    BeforeToolCallEvent,
+    HookRegistry,
+)
 from strands.models.openai import OpenAIModel
 from strands.tools.mcp import MCPClient
 
 from deep_review.configuration import DeepReviewConfig, McpConfig, McpServerConfig
 from deep_review.errors import WorkflowError
+from deep_review.logging_config import api_log_context
 from deep_review.models import (
     AgentRole,
     ConsolidationResult,
@@ -132,10 +141,10 @@ class McpCommands:
         self._stack.__exit__(*exc_info)
 
     def jira(self, name: str, arguments: dict[str, Any]) -> Any:
-        return self._call(self._jira, name, arguments)
+        return self._call(self._jira, name, arguments, source="jira")
 
     def bitbucket(self, name: str, arguments: dict[str, Any]) -> Any:
-        return self._call(self._bitbucket, name, arguments)
+        return self._call(self._bitbucket, name, arguments, source="bitbucket")
 
     @staticmethod
     def _validate_tools(client: MCPClient, required: set[str]) -> None:
@@ -144,24 +153,119 @@ class McpCommands:
             raise WorkflowError(f"required MCP tools are unavailable: {', '.join(sorted(missing))}")
 
     @staticmethod
-    def _call(client: MCPClient, name: str, arguments: dict[str, Any]) -> Any:
+    def _call(
+        client: MCPClient,
+        name: str,
+        arguments: dict[str, Any],
+        *,
+        source: str = "mcp",
+    ) -> Any:
+        started_at = time.monotonic()
+        LOGGER.info(
+            "Tool call started: source=%s, tool=%s",
+            source,
+            name,
+            extra=api_log_context(),
+        )
         try:
             result = client.call_tool_sync(str(uuid.uuid4()), name, arguments)
             if result.get("status") != "success" or result.get("isError") is True:
                 raise WorkflowError(f"MCP tool {name} returned an error")
-            if name in {
-                "add_comment",
-                "assign_issue",
-                "add_pull_request_comment",
-                "set_comment_resolved",
-                "set_review_status",
-            }:
-                LOGGER.info("external action completed: %s", name)
-            return _tool_value(result)
+            value = _tool_value(result)
         except WorkflowError:
+            _log_api_finished("Tool", f"source={source}, tool={name}", started_at, False)
             raise
         except Exception as exc:
+            _log_api_finished("Tool", f"source={source}, tool={name}", started_at, False)
             raise WorkflowError(f"MCP tool {name} failed: {exc}") from exc
+        _log_api_finished("Tool", f"source={source}, tool={name}", started_at, True)
+        return value
+
+
+class ApiCallLoggingHooks:
+    def __init__(self, role: AgentRole, model_id: str) -> None:
+        self._role = role
+        self._model_id = model_id
+        self._model_started_at: float | None = None
+        self._tool_started_at: dict[str, float] = {}
+
+    def register_hooks(self, registry: HookRegistry) -> None:
+        registry.add_callback(BeforeModelCallEvent, self._before_model_call)
+        registry.add_callback(AfterModelCallEvent, self._after_model_call)
+        registry.add_callback(BeforeToolCallEvent, self._before_tool_call)
+        registry.add_callback(AfterToolCallEvent, self._after_tool_call)
+
+    def _before_model_call(self, _: BeforeModelCallEvent) -> None:
+        self._model_started_at = time.monotonic()
+        LOGGER.info(
+            "LLM call started: agent=%s, model=%s",
+            self._role.value,
+            self._model_id,
+            extra=api_log_context(),
+        )
+
+    def _after_model_call(self, event: AfterModelCallEvent) -> None:
+        started_at = (
+            self._model_started_at
+            if self._model_started_at is not None
+            else time.monotonic()
+        )
+        self._model_started_at = None
+        _log_api_finished(
+            "LLM",
+            f"agent={self._role.value}, model={self._model_id}",
+            started_at,
+            event.exception is None,
+        )
+
+    def _before_tool_call(self, event: BeforeToolCallEvent) -> None:
+        tool_id = str(event.tool_use.get("toolUseId", ""))
+        self._tool_started_at[tool_id] = time.monotonic()
+        LOGGER.info(
+            "Tool call started: agent=%s, tool=%s",
+            self._role.value,
+            event.tool_use.get("name", "unknown"),
+            extra=api_log_context(),
+        )
+
+    def _after_tool_call(self, event: AfterToolCallEvent) -> None:
+        tool_id = str(event.tool_use.get("toolUseId", ""))
+        started_at = self._tool_started_at.pop(tool_id, None)
+        if started_at is None:
+            started_at = time.monotonic()
+        success = (
+            event.exception is None
+            and event.cancel_message is None
+            and event.result.get("status") != "error"
+        )
+        _log_api_finished(
+            "Tool",
+            f"agent={self._role.value}, tool={event.tool_use.get('name', 'unknown')}",
+            started_at,
+            success,
+            duration=event.duration,
+        )
+
+
+def _log_api_finished(
+    call_type: str,
+    details: str,
+    started_at: float,
+    success: bool,
+    *,
+    duration: float | None = None,
+) -> None:
+    elapsed = duration if duration is not None else time.monotonic() - started_at
+    level = logging.INFO if success else logging.ERROR
+    LOGGER.log(
+        level,
+        "%s call finished: %s, status=%s, duration=%.3fs",
+        call_type,
+        details,
+        "success" if success else "error",
+        max(0.0, elapsed),
+        extra=api_log_context(),
+    )
 
 
 class StrandsAgentRunner:
@@ -184,6 +288,7 @@ class StrandsAgentRunner:
                     system_prompt=self._prompt(role),
                     tools=[],
                     callback_handler=None,
+                    hooks=self._logging_hooks(role),
                 )
                 try:
                     LOGGER.info(
@@ -216,6 +321,7 @@ class StrandsAgentRunner:
                         *repository_tools(repository_root),
                     ],
                     callback_handler=None,
+                    hooks=self._logging_hooks(role),
                 )
                 try:
                     LOGGER.info(
@@ -245,6 +351,7 @@ class StrandsAgentRunner:
                     system_prompt=self._prompt(role),
                     tools=repository_tools(repository_root),
                     callback_handler=None,
+                    hooks=self._logging_hooks(role),
                 )
                 try:
                     LOGGER.info(
@@ -274,6 +381,7 @@ class StrandsAgentRunner:
                     system_prompt=self._prompt(role),
                     tools=repository_tools(repository_root),
                     callback_handler=None,
+                    hooks=self._logging_hooks(role),
                 )
                 try:
                     LOGGER.info(
@@ -303,6 +411,7 @@ class StrandsAgentRunner:
                     system_prompt=self._prompt(role),
                     tools=repository_tools(repository_root),
                     callback_handler=None,
+                    hooks=self._logging_hooks(role),
                 )
                 try:
                     LOGGER.info(
@@ -332,6 +441,7 @@ class StrandsAgentRunner:
                     system_prompt=self._prompt(role),
                     tools=[],
                     callback_handler=None,
+                    hooks=self._logging_hooks(role),
                 )
                 try:
                     LOGGER.info(
@@ -364,6 +474,7 @@ class StrandsAgentRunner:
                         self.servers.bitbucket(BITBUCKET_READ_TOOLS),
                     ],
                     callback_handler=None,
+                    hooks=self._logging_hooks(role),
                 )
                 try:
                     LOGGER.info(
@@ -428,6 +539,9 @@ class StrandsAgentRunner:
                 await openai_client.close()
             finally:
                 await http_client.aclose()
+
+    def _logging_hooks(self, role: AgentRole) -> list[ApiCallLoggingHooks]:
+        return [ApiCallLoggingHooks(role, self.config.resolve(role).llm.model_id)]
 
     def _prompt(self, role: AgentRole) -> str:
         path = self.prompts / f"{role.value}.md"

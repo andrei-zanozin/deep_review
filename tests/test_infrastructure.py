@@ -4,6 +4,7 @@ import asyncio
 import logging
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -13,10 +14,13 @@ from deep_review.configuration import DeepReviewConfig
 from deep_review.infrastructure import (
     AGENT_STEP_NAMES,
     NO_API_KEY,
+    ApiCallLoggingHooks,
+    McpCommands,
     McpFactory,
     StrandsAgentRunner,
     _tool_value,
 )
+from deep_review.logging_config import API_LOG_CATEGORY, LOG_CATEGORY_ATTRIBUTE
 from deep_review.models import (
     AgentRole,
     ConsolidationResult,
@@ -285,6 +289,11 @@ def test_agent_runners_expose_only_their_required_tools(
         [],
         ["jira-tools", "bitbucket-tools"],
     ]
+    assert all(
+        len(instance["hooks"]) == 1
+        and isinstance(instance["hooks"][0], ApiCallLoggingHooks)
+        for instance in FakeAgent.instances
+    )
     assert servers.calls == [
         ("jira", infrastructure.JIRA_READ_TOOLS),
         ("jira", infrastructure.JIRA_READ_TOOLS),
@@ -307,3 +316,86 @@ def test_mcp_result_parsing() -> None:
 
     with pytest.raises(infrastructure.WorkflowError, match="returned an error"):
         infrastructure.McpCommands._call(FailedClient(), "test", {})  # type: ignore[arg-type]
+
+
+def test_direct_mcp_calls_log_boundaries_without_payloads(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    class SuccessfulClient:
+        def call_tool_sync(self, *_: object) -> dict[str, object]:
+            return {
+                "status": "success",
+                "structuredContent": {"result": {"value": 42}},
+            }
+
+    with caplog.at_level(logging.INFO, logger=infrastructure.__name__):
+        value = McpCommands._call(  # type: ignore[arg-type]
+            SuccessfulClient(),
+            "get_issue",
+            {"token": "do-not-log-this"},
+            source="jira",
+        )
+
+    assert value == {"value": 42}
+    messages = [record.getMessage() for record in caplog.records]
+    assert messages[0] == "Tool call started: source=jira, tool=get_issue"
+    assert messages[1].startswith(
+        "Tool call finished: source=jira, tool=get_issue, status=success, duration="
+    )
+    assert "do-not-log-this" not in "\n".join(messages)
+    assert all(
+        getattr(record, LOG_CATEGORY_ATTRIBUTE) == API_LOG_CATEGORY
+        for record in caplog.records
+    )
+
+
+def test_failed_mcp_call_logs_an_error_completion(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    class FailedClient:
+        def call_tool_sync(self, *_: object) -> dict[str, object]:
+            return {"status": "error", "content": []}
+
+    with (
+        caplog.at_level(logging.INFO, logger=infrastructure.__name__),
+        pytest.raises(infrastructure.WorkflowError, match="returned an error"),
+    ):
+        McpCommands._call(FailedClient(), "get_issue", {}, source="jira")  # type: ignore[arg-type]
+
+    completion = caplog.records[-1]
+    assert completion.levelno == logging.ERROR
+    assert "status=error" in completion.getMessage()
+
+
+def test_agent_hooks_log_llm_and_tool_boundaries(
+    monkeypatch: Any,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    timestamps = iter((10.0, 11.25, 20.0))
+    monkeypatch.setattr(infrastructure.time, "monotonic", lambda: next(timestamps))
+    hooks = ApiCallLoggingHooks(AgentRole.ARCHITECTURE_EXPERT, "review-model")
+
+    with caplog.at_level(logging.INFO, logger=infrastructure.__name__):
+        hooks._before_model_call(None)  # type: ignore[arg-type]
+        hooks._after_model_call(SimpleNamespace(exception=None))  # type: ignore[arg-type]
+        hooks._before_tool_call(  # type: ignore[arg-type]
+            SimpleNamespace(tool_use={"toolUseId": "tool-1", "name": "read_file"})
+        )
+        hooks._after_tool_call(  # type: ignore[arg-type]
+            SimpleNamespace(
+                tool_use={"toolUseId": "tool-1", "name": "read_file"},
+                exception=None,
+                cancel_message=None,
+                result={"status": "success"},
+                duration=0.25,
+            )
+        )
+
+    assert [record.getMessage() for record in caplog.records] == [
+        "LLM call started: agent=architecture_expert, model=review-model",
+        "LLM call finished: agent=architecture_expert, model=review-model, "
+        "status=success, duration=1.250s",
+        "Tool call started: agent=architecture_expert, tool=read_file",
+        "Tool call finished: agent=architecture_expert, tool=read_file, "
+        "status=success, duration=0.250s",
+    ]

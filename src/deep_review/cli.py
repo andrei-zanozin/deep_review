@@ -2,14 +2,16 @@ from __future__ import annotations
 
 import argparse
 import logging
-import sys
 
 from deep_review.errors import WorkflowError
+from deep_review.logging_config import configure_logging
 from deep_review.workflow import run_review
+
+LOGGER = logging.getLogger(__name__)
 
 
 def main() -> None:
-    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
+    configure_logging()
     parser = argparse.ArgumentParser(description="Run the deterministic deep-review workflow.")
     parser.add_argument("jira_issue")
     args = parser.parse_args()
@@ -18,5 +20,5 @@ def main() -> None:
         if result.status != "complete":
             raise SystemExit(1)
     except WorkflowError as exc:
-        print(f"Failed: {exc}", file=sys.stderr)
+        LOGGER.error("Failed: %s", exc)
         raise SystemExit(1) from exc
