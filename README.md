@@ -1,77 +1,75 @@
 # deep_review
 
-A deterministic Python prototype for the `deep_review_workflow`. Python owns sequencing, safety
-gates, and external mutations; Strands agents provide bounded engineering judgment.
+`deep_review` is a Python workflow for evidence-based Bitbucket pull-request review. It retrieves
+the Jira issue, finds matching open pull requests, reviews their local diffs with specialist agents,
+consolidates verified findings, and publishes the result to Bitbucket and Jira.
 
-## Configuration
+## Before you start
 
-Copy the tracked example to the project root and edit the local copy:
+You need:
+
+- Python 3.11 or later and [uv](https://docs.astral.sh/uv/).
+- A local clone of every repository that may be reviewed. Start the command from one of those
+  clones. The workflow also considers Git repositories directly beside it.
+- A clean working tree in each candidate clone. During review, the workflow fetches the PR source
+  branch and may switch the checkout to that branch; it never proceeds with uncommitted changes.
+- Working Jira and Bitbucket MCP servers, and an OpenAI-compatible endpoint for the configured
+  models.
+
+The local clone's `origin` must be an unambiguous Bitbucket URL whose project and repository match
+the pull request. If an issue has a matching PR without one unambiguous local clone, that PR is
+reported as skipped rather than reviewed.
+
+## Configure the workflow
+
+From this project directory, create the local configuration:
 
 ```bash
 cp config.example.yml config.yml
 ```
 
-`config.yml` is ignored by Git and is the application's only configuration source. Environment
-variables are supported through complete-scalar references such as `${JIRA_PAT}`. Every reference
-must resolve to a non-blank value before any MCP server, model, or external action starts.
+Edit `config.yml` before the first run. It is ignored by Git and is the only application
+configuration file. The tracked example shows the required sections:
 
-Both `mcp.jira` and `mcp.bitbucket` require a non-empty command array. Commands run directly, without
-a shell, from the directory containing `config.yml`. Each MCP process receives exactly its configured
-`environment` map, so proxy values must be listed there when wanted. The MCP server's own local
-configuration continues to determine how those forwarded values are interpreted.
+- `mcp.jira` and `mcp.bitbucket`: command arrays for the MCP servers and the exact environment
+  variables each process receives. Commands are executed without a shell and relative paths are
+  resolved from this project directory.
+- `llm`: the OpenAI-compatible `base_url`, `api_key`, and `model_id` used by every agent unless a
+  role overrides them under `agents`.
+- `proxy`: required only when an agent sets `use_proxy: true`. Configure the username and password
+  together. Model clients otherwise ignore ambient proxy variables.
 
-The root `llm` supplies the OpenAI-compatible Chat Completions endpoint and model for every role.
-Agent entries are optional. An unlisted role inherits the root LLM and defaults to `use_proxy: false`.
-An agent LLM overrides only fields written in that entry, and its `parameters` map is shallow-merged
-over the root parameters. Setting `api_key: null` explicitly removes the inherited key.
+Set every environment variable referenced as `${NAME}` in `config.yml` before running. References
+must occupy the complete YAML value and resolve to a non-empty value. For the bundled example,
+that includes the Jira, Bitbucket, proxy, and model credentials it references. Replace the example
+MCP command paths and model IDs when your local layout or providers differ.
 
-Token pricing is optional and belongs to the relevant `llm` block. Prices are expressed in USD per
-one million tokens. A role that retains the root `model_id` inherits its price; a role that changes
-the model without defining `pricing` reports tokens but no cost. Set `pricing: null` to explicitly
-disable inherited pricing.
+Agent LLM entries inherit unspecified fields from `llm`; their `parameters` values are merged with
+the root parameters. Set `api_key: null` only for an endpoint that does not require authentication.
+Optional token pricing is expressed in USD per million tokens in the relevant `llm` block. A cost
+is shown only when pricing is available for all reported usage.
 
-```yaml
-llm:
-  model_id: "review-model"
-  pricing:
-    input_usd_per_million_tokens: "1.00"
-    output_usd_per_million_tokens: "4.00"
-    cache_read_input_usd_per_million_tokens: "0.25"
-```
+## Run a review
 
-At the end of a run, the console shows reported token usage per model and in total. Costs appear
-only when every required price is configured; no cost estimate is generated for unavailable usage.
-
-For example, an OpenAI-compatible local endpoint that requires no authentication can be configured
-for one role as follows:
-
-```yaml
-agents:
-  code_polish_expert:
-    use_proxy: false
-    llm:
-      base_url: "http://127.0.0.1:8000/v1"
-      api_key: null
-      model_id: "local-model"
-```
-
-Only agents with `use_proxy: true` use the root proxy. Such entries require a root `proxy` section.
-Proxy username and password must either both be present or both be absent. Direct and proxied model
-clients ignore ambient proxy variables. TLS certificate verification is disabled for all model
-connections; use only trusted endpoints and networks because this permits interception of model
-traffic.
-
-## Run
-
-Run from the Bitbucket repository to review:
+Change to a clean checkout that can be reviewed, then run this project's command explicitly:
 
 ```bash
-uv run deep-review ABC-123
+cd /path/to/repository-to-review
+uv run --project /path/to/deep_review deep-review ABC-123
 ```
 
-OPEN PRs are discovered across repositories where the configured Bitbucket user is a reviewer. The
-current Git repository and one-level sibling checkouts are matched to those PRs by their validated
-`origin`; PRs without an unambiguous local checkout are reported but not reviewed.
+Use the Jira issue key as the only argument. The workflow reads the issue and its comments, then
+searches for matching open pull requests. It reviews matching local checkouts, including eligible
+sibling checkouts, and verifies the pull-request head and base again before publishing.
+
+This command has external effects. For reviewed pull requests it can add finding comments, resolve
+or reply to earlier reviewer comments during a fix-verification review, and set the review status
+to `APPROVED` or `NEEDS_WORK`. On successful completion it also comments on the Jira issue and
+assigns it to the requestor. Run it only with credentials authorized to make those changes.
+
+If a target cannot be safely prepared or changes during review, the workflow skips or fails that
+target and reports the incomplete review to Jira. The process exits with a non-zero status unless
+the whole ticket review completes.
 
 ## Development
 
