@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 import pytest
@@ -48,17 +49,50 @@ def test_discover_repository_uses_local_origin(git_repository: Path) -> None:
     )
 
 
-def test_discovers_sibling_repositories_and_omits_ambiguous_identity(tmp_path: Path) -> None:
+def test_discovers_sibling_repositories_and_omits_ambiguous_identity(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
     current = tmp_path / "current"
     sibling = tmp_path / "sibling"
     duplicate = tmp_path / "duplicate"
     create_repository(current, "PRJ", "current")
     create_repository(sibling, "PRJ", "shared")
-    create_repository(duplicate, "PRJ", "shared")
+    create_repository(duplicate, "prj", "SHARED")
 
-    repositories = discover_sibling_repositories(current)
+    with caplog.at_level(logging.WARNING, logger="deep_review.repository"):
+        repositories = discover_sibling_repositories(current)
 
-    assert repositories.keys() == {("PRJ", "current")}
+    assert repositories.keys() == {("prj", "current")}
+    messages = [record.getMessage() for record in caplog.records]
+    ambiguity = next(
+        message for message in messages if message.startswith("ambiguous local repository identity")
+    )
+    assert "normalized_identity=prj/shared" in ambiguity
+    assert "candidate_identity=PRJ/shared" in ambiguity
+    assert str(sibling) in ambiguity
+    assert str(duplicate) in ambiguity
+
+
+def test_logs_invalid_local_repository_candidate(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    current = tmp_path / "current"
+    invalid = tmp_path / "invalid"
+    create_repository(current, "PRJ", "current")
+    invalid.mkdir()
+    (invalid / ".git").mkdir()
+
+    with caplog.at_level(logging.WARNING, logger="deep_review.repository"):
+        repositories = discover_sibling_repositories(current)
+
+    assert repositories.keys() == {("prj", "current")}
+    rejection = next(
+        record.getMessage()
+        for record in caplog.records
+        if record.getMessage().startswith("local repository candidate skipped")
+    )
+    assert f"path={invalid}" in rejection
+    assert "reason=" in rejection
 
 
 def test_prepare_checkout_rejects_dirty_repository(git_repository: Path) -> None:

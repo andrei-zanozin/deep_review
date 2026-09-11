@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import re
 import subprocess
 from collections.abc import Sequence
@@ -10,7 +11,15 @@ from strands import tool
 from unidiff import PatchSet
 
 from deep_review.errors import WorkflowError
-from deep_review.models import Finding, PullRequestTarget, RepositoryIdentity, Side
+from deep_review.models import (
+    Finding,
+    PullRequestTarget,
+    RepositoryIdentity,
+    Side,
+    _repository_identity_key,
+)
+
+LOGGER = logging.getLogger(__name__)
 
 REMOTE_PATTERNS = (
     re.compile(r"^https?://[^/]+/(?:scm/)?(?P<project>[^/]+)/(?P<repo>[^/]+?)(?:\.git)?$"),
@@ -53,19 +62,42 @@ def discover_sibling_repositories(
         for child in sorted(current.root.parent.iterdir())
         if child != current.root and child.is_dir() and (child / ".git").exists()
     )
-
-    current_identity = (current.project, current.repository)
+    current_identity = _repository_identity_key(current.project, current.repository)
     discovered: dict[tuple[str, str], RepositoryIdentity] = {current_identity: current}
     ambiguous: set[tuple[str, str]] = set()
     for candidate in candidates:
         try:
             repository = discover_repository(candidate)
-        except WorkflowError:
+        except WorkflowError as exc:
+            LOGGER.warning(
+                "local repository candidate skipped: path=%s, reason=%s",
+                candidate.resolve(),
+                exc,
+            )
             continue
-        identity = (repository.project, repository.repository)
+        identity = _repository_identity_key(repository.project, repository.repository)
         if identity == current_identity:
+            if repository.root != current.root:
+                LOGGER.warning(
+                    "duplicate local repository identity ignored in favor of current checkout: "
+                    "identity=%s/%s, current_path=%s, duplicate_path=%s",
+                    repository.project,
+                    repository.repository,
+                    current.root,
+                    repository.root,
+                )
             continue
         if identity in discovered and discovered[identity].root != repository.root:
+            LOGGER.warning(
+                "ambiguous local repository identity omitted: normalized_identity=%s/%s, "
+                "candidate_identity=%s/%s, paths=%s, %s",
+                identity[0],
+                identity[1],
+                repository.project,
+                repository.repository,
+                discovered[identity].root,
+                repository.root,
+            )
             ambiguous.add(identity)
         else:
             discovered[identity] = repository

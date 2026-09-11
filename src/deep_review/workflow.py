@@ -23,6 +23,7 @@ from deep_review.models import (
     RepositoryIdentity,
     ReviewType,
     TicketReviewContext,
+    _repository_identity_key,
 )
 from deep_review.publication import finish_jira, publish, report_incomplete_jira
 from deep_review.repository import discover_sibling_repositories, prepare_checkout
@@ -91,9 +92,30 @@ def _prepare_pull_requests(
 ) -> None:
     related = [_related_pull_request(item) for item in context.pull_requests]
     for pull_request in context.pull_requests:
-        identity = (pull_request.key.project, pull_request.key.repository)
+        identity = _repository_identity_key(
+            pull_request.key.project, pull_request.key.repository
+        )
         repository = repositories.get(identity)
         if repository is None:
+            available = ", ".join(
+                f"{candidate.project}/{candidate.repository} at {candidate.root}"
+                for candidate in sorted(
+                    repositories.values(),
+                    key=lambda item: (
+                        *_repository_identity_key(item.project, item.repository),
+                        item.root,
+                    ),
+                )
+            )
+            LOGGER.warning(
+                "local checkout lookup failed for PR %s: expected identity=%s/%s; "
+                "discovered repositories=%s; see repository discovery logs for skipped or "
+                "ambiguous candidates",
+                _pull_request_label(pull_request),
+                pull_request.key.project,
+                pull_request.key.repository,
+                available or "none",
+            )
             _fail_pull_request(
                 context,
                 pull_request,

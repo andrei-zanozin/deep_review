@@ -7,6 +7,10 @@ from typing import Annotated, Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
+def _repository_identity_key(project: str, repository: str) -> tuple[str, str]:
+    return project.casefold(), repository.casefold()
+
+
 class StrictModel(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
@@ -195,9 +199,11 @@ class PrReviewContext(StrictModel):
         if self.key != self.target.key:
             raise ValueError("pull-request context key does not match its target")
         if self.repository is not None and (
-            self.repository.project,
-            self.repository.repository,
-        ) != (self.key.project, self.key.repository):
+            _repository_identity_key(
+                self.repository.project, self.repository.repository
+            )
+            != _repository_identity_key(self.key.project, self.key.repository)
+        ):
             raise ValueError("pull-request context repository does not match its key")
         return self
 

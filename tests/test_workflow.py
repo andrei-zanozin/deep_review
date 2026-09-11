@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import Any
 
+import pytest
 from conftest import run_git
 
 from deep_review.models import (
@@ -201,10 +203,16 @@ def test_truncated_diff_stops_before_specialist_agents(git_repository: Path) -> 
 
 
 class MultiRepoCommands(FakeCommands):
-    def __init__(self, heads: dict[str, str], approved_repository: str | None = None) -> None:
+    def __init__(
+        self,
+        heads: dict[str, str],
+        approved_repository: str | None = None,
+        project: str = "PRJ",
+    ) -> None:
         super().__init__(next(iter(heads.values())))
         self.heads = heads
         self.approved_repository = approved_repository
+        self.project = project
 
     def bitbucket(self, name: str, arguments: dict[str, Any]) -> Any:
         self.calls.append(("bitbucket", name, arguments))
@@ -213,7 +221,7 @@ class MultiRepoCommands(FakeCommands):
                 "items": [
                     {
                         "id": index,
-                        "project": "PRJ",
+                        "project": self.project,
                         "repository": repository,
                         "state": "OPEN",
                         "reviewers": [
@@ -253,7 +261,7 @@ class CapturingAgents(FakeAgents):
         return super().cross_pr_validator(payload)
 
 
-def create_repository(path: Path, repository: str) -> str:
+def create_repository(path: Path, repository: str, project: str = "PRJ") -> str:
     path.mkdir()
     run_git(path, "init", "-b", "main")
     run_git(path, "config", "user.name", "Test User")
@@ -261,7 +269,7 @@ def create_repository(path: Path, repository: str) -> str:
     (path / "code.txt").write_text(repository, encoding="utf-8")
     run_git(path, "add", "code.txt")
     run_git(path, "commit", "-m", "base")
-    run_git(path, "remote", "add", "origin", f"ssh://git@example.test/PRJ/{repository}.git")
+    run_git(path, "remote", "add", "origin", f"ssh://git@example.test/{project}/{repository}.git")
     return run_git(path, "rev-parse", "HEAD")
 
 
@@ -298,12 +306,15 @@ def test_ticket_context_correlates_reviewed_and_evidence_only_prs(tmp_path: Path
     assert len(statuses) == 1
 
 
-def test_missing_local_repository_publishes_valid_pr_and_reports_partial(tmp_path: Path) -> None:
+def test_missing_local_repository_publishes_valid_pr_and_reports_partial(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
     first = tmp_path / "repo-a"
     head = create_repository(first, "repo-a")
     commands = MultiRepoCommands({"repo-a": head, "missing": "c" * 40})
 
-    result = execute_review("ABC-123", first, commands, FakeAgents(False))
+    with caplog.at_level(logging.WARNING, logger="deep_review.workflow"):
+        result = execute_review("ABC-123", first, commands, FakeAgents(False))
 
     assert result.status == "partial"
     assert {item.key.repository: item.status for item in result.pull_requests} == {
@@ -313,3 +324,32 @@ def test_missing_local_repository_publishes_valid_pr_and_reports_partial(tmp_pat
     jira_comments = [args for server, name, args in commands.calls if name == "add_comment"]
     assert "Deep review is incomplete" in jira_comments[-1]["body"]
     assert not any(name == "assign_issue" for _, name, _ in commands.calls)
+    warning = next(
+        record.getMessage()
+        for record in caplog.records
+        if record.getMessage().startswith("local checkout lookup failed")
+    )
+    assert "expected identity=PRJ/missing" in warning
+    assert f"discovered repositories=PRJ/repo-a at {first}" in warning
+
+
+def test_local_repository_matching_is_case_insensitive(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    repository = tmp_path / "repository"
+    head = create_repository(repository, "repository", project="prj")
+    commands = MultiRepoCommands({"repository": head}, project="PRJ")
+
+    with caplog.at_level(logging.INFO):
+        result = execute_review("ABC-123", repository, commands, FakeAgents(False))
+
+    assert result.status == "complete"
+    assert result.pull_requests[0].repository is not None
+    assert result.pull_requests[0].repository.root == repository
+    assert not [
+        record for record in caplog.records if record.name == "deep_review.repository"
+    ]
+    assert not any(
+        record.getMessage().startswith("local checkout lookup failed")
+        for record in caplog.records
+    )
