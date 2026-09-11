@@ -88,7 +88,7 @@ class AgentRunner(Protocol):
     def cross_pr_validator(self, context: dict[str, Any]) -> CrossPrValidationResult: ...
 
 
-class ServerFactory:
+class McpFactory:
     def __init__(self, config: McpConfig, config_dir: Path) -> None:
         self.config = config
         self.config_dir = config_dir.resolve()
@@ -115,7 +115,7 @@ class ServerFactory:
 
 
 class McpCommands:
-    def __init__(self, servers: ServerFactory) -> None:
+    def __init__(self, servers: McpFactory) -> None:
         self._jira = servers.jira()
         self._bitbucket = servers.bitbucket()
         self._stack = ExitStack()
@@ -175,7 +175,7 @@ class StrandsAgentRunner:
     def __init__(
         self,
         config: DeepReviewConfig,
-        servers: ServerFactory,
+        servers: McpFactory,
         prompts: Path,
     ) -> None:
         self.config = config
@@ -467,7 +467,7 @@ class StrandsAgentRunner:
 
 
 def runtime_agent_runner(
-    config: DeepReviewConfig, servers: ServerFactory
+    config: DeepReviewConfig, servers: McpFactory
 ) -> StrandsAgentRunner:
     return StrandsAgentRunner(
         config=config,

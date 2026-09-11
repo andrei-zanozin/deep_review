@@ -13,7 +13,7 @@ from deep_review.configuration import DeepReviewConfig
 from deep_review.infrastructure import (
     AGENT_STEP_NAMES,
     NO_API_KEY,
-    ServerFactory,
+    McpFactory,
     StrandsAgentRunner,
     _tool_value,
 )
@@ -165,7 +165,7 @@ def test_server_factory_splits_commands_and_forwards_only_configured_environment
     monkeypatch.setattr(infrastructure, "stdio_client", lambda parameters: parameters)
     monkeypatch.setenv("AMBIENT_SECRET", "must-not-be-forwarded")
 
-    servers = ServerFactory(runtime_config().mcp, tmp_path)
+    servers = McpFactory(runtime_config().mcp, tmp_path)
     servers.jira({"get_issue"})
     servers.bitbucket()
 

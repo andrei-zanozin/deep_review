@@ -12,7 +12,7 @@ from deep_review.infrastructure import (
     AgentRunner,
     Commands,
     McpCommands,
-    ServerFactory,
+    McpFactory,
     runtime_agent_runner,
 )
 from deep_review.models import (
@@ -36,7 +36,7 @@ def run_review(issue: str) -> TicketReviewContext:
     """Run a review for the repository containing the current directory."""
     config_path = project_config_path()
     config = load_config(config_path)
-    servers = ServerFactory(config.mcp, config_path.parent)
+    servers = McpFactory(config.mcp, config_path.parent)
     agents = runtime_agent_runner(config, servers)
     with McpCommands(servers) as commands:
         return execute_review(issue, Path.cwd(), commands, agents)
