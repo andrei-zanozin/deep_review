@@ -6,7 +6,7 @@ otherwise select the most detailed candidate. Preserve its title, location, prob
 evidence, and return the highest severity in the group. Do not combine plausible locations; keep
 them separate when uncertain.
 
-For a secondary review, exclude a candidate as an existing-comment duplicate only when a refreshed
+For a fix-verifier review, exclude a candidate as an existing-comment duplicate only when a refreshed
 unresolved reviewer root comment clearly covers the same defect and affected unit. Changed anchors
 alone do not prevent a match. Keep the candidate when uncertain or behavior differs. Reference only
 the supplied candidate IDs. Every candidate must appear exactly once as selected, duplicate, or an

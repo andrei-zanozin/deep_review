@@ -6,9 +6,9 @@ from typing import Any, Literal
 from deep_review.discovery import all_pages
 from deep_review.errors import WorkflowError
 from deep_review.infrastructure import AgentRunner, Commands
-from deep_review.models import DiscoveryResult, PullRequestTarget, SecondaryDecision
+from deep_review.models import DiscoveryResult, PullRequestTarget, FixVerifierDecision
 
-SecondaryStatus = Literal["No issues found", "Done"]
+FixVerifierStatus = Literal["No issues found", "Done"]
 
 
 def reconcile(
@@ -20,7 +20,7 @@ def reconcile(
     repository_root: Any,
     commands: Commands,
     agents: AgentRunner,
-) -> SecondaryStatus:
+) -> FixVerifierStatus:
     decisions, _ = plan_reconciliation(
         issue,
         jira_comments,
@@ -43,11 +43,11 @@ def plan_reconciliation(
     repository_root: Any,
     commands: Commands,
     agents: AgentRunner,
-) -> tuple[list[SecondaryDecision], list[dict[str, Any]]]:
+) -> tuple[list[FixVerifierDecision], list[dict[str, Any]]]:
     roots = _reviewer_roots(_comments(target, commands), discovery.reviewer.username)
-    decisions: list[SecondaryDecision] = []
+    decisions: list[FixVerifierDecision] = []
     for root in roots:
-        decision = agents.secondary(
+        decision = agents.fix_verifier(
             {
                 "issue": deepcopy(issue),
                 "jira_comments": deepcopy(jira_comments),
@@ -60,17 +60,17 @@ def plan_reconciliation(
             repository_root,
         )
         if decision.comment_id != root.get("id"):
-            raise WorkflowError("secondary decision references a different comment")
+            raise WorkflowError("fix_verifier decision references a different comment")
         decisions.append(decision)
     return decisions, roots
 
 
 def apply_reconciliation(
     target: PullRequestTarget,
-    decisions: list[SecondaryDecision],
+    decisions: list[FixVerifierDecision],
     discovery: DiscoveryResult,
     commands: Commands,
-) -> SecondaryStatus:
+) -> FixVerifierStatus:
     for decision in decisions:
         _apply_decision(target, decision, commands)
         _verify_decision(target, decision, discovery, commands)
@@ -80,7 +80,7 @@ def apply_reconciliation(
         return "No issues found"
     if all(_has_current_reviewer_reply(root, discovery) for root in remaining):
         return "Done"
-    raise WorkflowError("secondary review left a comment without the required reviewer reply")
+    raise WorkflowError("fix_verifier review left a comment without the required reviewer reply")
 
 
 def unresolved_reviewer_comments(
@@ -110,7 +110,7 @@ def _reviewer_roots(comments: list[dict[str, Any]], reviewer: str) -> list[dict[
 
 
 def _apply_decision(
-    target: PullRequestTarget, decision: SecondaryDecision, commands: Commands
+    target: PullRequestTarget, decision: FixVerifierDecision, commands: Commands
 ) -> None:
     if decision.action == "resolve":
         commands.bitbucket(
@@ -130,7 +130,7 @@ def _apply_decision(
 
 def _verify_decision(
     target: PullRequestTarget,
-    decision: SecondaryDecision,
+    decision: FixVerifierDecision,
     discovery: DiscoveryResult,
     commands: Commands,
 ) -> None:
@@ -143,13 +143,13 @@ def _verify_decision(
         None,
     )
     if root is None:
-        raise WorkflowError("secondary mutation verification could not find the root comment")
+        raise WorkflowError("fix_verifier mutation verification could not find the root comment")
     if decision.action == "resolve" and not root.get("resolved"):
-        raise WorkflowError("secondary resolve action was not verified")
+        raise WorkflowError("fix_verifier resolve action was not verified")
     if decision.action in {"reply", "no_action"} and not _has_current_reviewer_reply(
         root, discovery
     ):
-        raise WorkflowError("secondary reviewer reply was not verified")
+        raise WorkflowError("fix_verifier reviewer reply was not verified")
 
 
 def _has_current_reviewer_reply(root: dict[str, Any], discovery: DiscoveryResult) -> bool:

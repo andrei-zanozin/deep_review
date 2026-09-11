@@ -24,8 +24,8 @@ from deep_review.models import (
     DiscoveryResult,
     LocationVerification,
     ReviewResult,
-    SecondaryDecision,
-    TicketCorrelationResult,
+    FixVerifierDecision,
+    CrossPrValidationResult,
 )
 from deep_review.repository import repository_tools
 
@@ -35,13 +35,13 @@ NO_API_KEY = "deep-review-no-api-key"
 
 AGENT_STEP_NAMES = {
     AgentRole.DISCOVERY: "Identify reviewer, requestor, and review type",
-    AgentRole.SECONDARY: "Reconcile an existing reviewer comment",
-    AgentRole.ARCHITECTURE: "Review architecture and design",
-    AgentRole.UNIT: "Review unit-level correctness",
-    AgentRole.CODE_POLISH: "Review code quality and maintainability",
-    AgentRole.CONSOLIDATION: "Consolidate review findings",
+    AgentRole.FIX_VERIFIER: "Reconcile an existing reviewer comment",
+    AgentRole.ARCHITECTURE_EXPERT: "Review architecture and design",
+    AgentRole.IMPLEMENTATION_EXPERT: "Review implementation-level correctness",
+    AgentRole.CODE_POLISH_EXPERT: "Review code quality and maintainability",
+    AgentRole.CONSOLIDATOR: "Consolidate review findings",
     AgentRole.LOCATION_VERIFIER: "Verify finding locations",
-    AgentRole.TICKET_CORRELATION: "Correlate findings across pull requests",
+    AgentRole.CROSS_PR_VALIDATOR: "Correlate findings across pull requests",
 }
 
 JIRA_READ_TOOLS = {"get_issue", "get_issue_comments"}
@@ -52,6 +52,8 @@ BITBUCKET_READ_TOOLS = {
     "get_pull_request_diff",
     "get_pull_request_comments",
 }
+
+
 class Commands(Protocol):
     def jira(self, name: str, arguments: dict[str, Any]) -> Any: ...
 
@@ -61,27 +63,29 @@ class Commands(Protocol):
 class AgentRunner(Protocol):
     def discovery(self, context: dict[str, Any]) -> DiscoveryResult: ...
 
-    def secondary(
+    def fix_verifier(
         self, context: dict[str, Any], repository_root: Path
-    ) -> SecondaryDecision: ...
+    ) -> FixVerifierDecision: ...
 
-    def architecture(
-        self, context: dict[str, Any], repository_root: Path
-    ) -> ReviewResult: ...
-
-    def unit(self, context: dict[str, Any], repository_root: Path) -> ReviewResult: ...
-
-    def code_polish(
+    def architecture_expert(
         self, context: dict[str, Any], repository_root: Path
     ) -> ReviewResult: ...
 
-    def consolidation(self, context: dict[str, Any]) -> ConsolidationResult: ...
+    def implementation_expert(
+        self, context: dict[str, Any], repository_root: Path
+    ) -> ReviewResult: ...
+
+    def code_polish_expert(
+        self, context: dict[str, Any], repository_root: Path
+    ) -> ReviewResult: ...
+
+    def consolidator(self, context: dict[str, Any]) -> ConsolidationResult: ...
 
     def location_verifier(
         self, context: dict[str, Any], repository_root: Path
     ) -> LocationVerification: ...
 
-    def ticket_correlation(self, context: dict[str, Any]) -> TicketCorrelationResult: ...
+    def cross_pr_validator(self, context: dict[str, Any]) -> CrossPrValidationResult: ...
 
 
 class ServerFactory:
@@ -206,9 +210,9 @@ class StrandsAgentRunner:
 
         return asyncio.run(invoke())
 
-    def secondary(self, context: dict[str, Any], repository_root: Path) -> SecondaryDecision:
-        async def invoke() -> SecondaryDecision:
-            role = AgentRole.SECONDARY
+    def fix_verifier(self, context: dict[str, Any], repository_root: Path) -> FixVerifierDecision:
+        async def invoke() -> FixVerifierDecision:
+            role = AgentRole.FIX_VERIFIER
             async with self._model(role) as model:
                 agent = Agent(
                     model=model,
@@ -227,7 +231,7 @@ class StrandsAgentRunner:
                     )
                     result = await agent.invoke_async(
                         json.dumps(context, default=str, ensure_ascii=False),
-                        structured_output_model=SecondaryDecision,
+                        structured_output_model=FixVerifierDecision,
                     )
                 except Exception as exc:
                     raise WorkflowError(f"{role.value} agent failed: {exc}") from exc
@@ -237,9 +241,9 @@ class StrandsAgentRunner:
 
         return asyncio.run(invoke())
 
-    def architecture(self, context: dict[str, Any], repository_root: Path) -> ReviewResult:
+    def architecture_expert(self, context: dict[str, Any], repository_root: Path) -> ReviewResult:
         async def invoke() -> ReviewResult:
-            role = AgentRole.ARCHITECTURE
+            role = AgentRole.ARCHITECTURE_EXPERT
             async with self._model(role) as model:
                 agent = Agent(
                     model=model,
@@ -265,9 +269,9 @@ class StrandsAgentRunner:
 
         return asyncio.run(invoke())
 
-    def unit(self, context: dict[str, Any], repository_root: Path) -> ReviewResult:
+    def implementation_expert(self, context: dict[str, Any], repository_root: Path) -> ReviewResult:
         async def invoke() -> ReviewResult:
-            role = AgentRole.UNIT
+            role = AgentRole.IMPLEMENTATION_EXPERT
             async with self._model(role) as model:
                 agent = Agent(
                     model=model,
@@ -293,9 +297,9 @@ class StrandsAgentRunner:
 
         return asyncio.run(invoke())
 
-    def code_polish(self, context: dict[str, Any], repository_root: Path) -> ReviewResult:
+    def code_polish_expert(self, context: dict[str, Any], repository_root: Path) -> ReviewResult:
         async def invoke() -> ReviewResult:
-            role = AgentRole.CODE_POLISH
+            role = AgentRole.CODE_POLISH_EXPERT
             async with self._model(role) as model:
                 agent = Agent(
                     model=model,
@@ -321,9 +325,9 @@ class StrandsAgentRunner:
 
         return asyncio.run(invoke())
 
-    def consolidation(self, context: dict[str, Any]) -> ConsolidationResult:
+    def consolidator(self, context: dict[str, Any]) -> ConsolidationResult:
         async def invoke() -> ConsolidationResult:
-            role = AgentRole.CONSOLIDATION
+            role = AgentRole.CONSOLIDATOR
             async with self._model(role) as model:
                 agent = Agent(
                     model=model,
@@ -379,9 +383,9 @@ class StrandsAgentRunner:
 
         return asyncio.run(invoke())
 
-    def ticket_correlation(self, context: dict[str, Any]) -> TicketCorrelationResult:
-        async def invoke() -> TicketCorrelationResult:
-            role = AgentRole.TICKET_CORRELATION
+    def cross_pr_validator(self, context: dict[str, Any]) -> CrossPrValidationResult:
+        async def invoke() -> CrossPrValidationResult:
+            role = AgentRole.CROSS_PR_VALIDATOR
             async with self._model(role) as model:
                 agent = Agent(
                     model=model,
@@ -400,7 +404,7 @@ class StrandsAgentRunner:
                     )
                     result = await agent.invoke_async(
                         json.dumps(context, default=str, ensure_ascii=False),
-                        structured_output_model=TicketCorrelationResult,
+                        structured_output_model=CrossPrValidationResult,
                     )
                 except Exception as exc:
                     raise WorkflowError(f"{role.value} agent failed: {exc}") from exc

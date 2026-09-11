@@ -61,7 +61,7 @@ def test_tracked_example_is_valid() -> None:
         },
     )
 
-    assert config.resolve(AgentRole.CODE_POLISH).llm.api_key is None
+    assert config.resolve(AgentRole.CODE_POLISH_EXPERT).llm.api_key is None
 
 
 @pytest.mark.parametrize(
@@ -161,14 +161,14 @@ def test_resolves_inheritance_defaults_overrides_and_explicit_key_clearing(
         + BASE_CONFIG
         + """
 agents:
-  architecture:
+  architecture_expert:
     use_proxy: true
     llm:
-      model_id: architecture-model
+      model_id: architecture_expert-model
       parameters:
         max_tokens: 2000
         top_p: 0.5
-  code_polish:
+  code_polish_expert:
     llm:
       base_url: http://127.0.0.1:8000/v1
       api_key: null
@@ -180,23 +180,23 @@ agents:
         {"JIRA_PAT": "jira", "LLM_KEY": "root-key"},
     )
 
-    architecture = config.resolve(AgentRole.ARCHITECTURE)
-    assert architecture.use_proxy is True
-    assert architecture.llm.model_id == "architecture-model"
-    assert architecture.llm.parameters == {
+    architecture_expert = config.resolve(AgentRole.ARCHITECTURE_EXPERT)
+    assert architecture_expert.use_proxy is True
+    assert architecture_expert.llm.model_id == "architecture_expert-model"
+    assert architecture_expert.llm.parameters == {
         "temperature": 0,
         "max_tokens": 2000,
         "top_p": 0.5,
     }
-    assert architecture.llm.api_key is not None
-    assert architecture.llm.api_key.get_secret_value() == "root-key"
+    assert architecture_expert.llm.api_key is not None
+    assert architecture_expert.llm.api_key.get_secret_value() == "root-key"
 
-    polish = config.resolve(AgentRole.CODE_POLISH)
+    polish = config.resolve(AgentRole.CODE_POLISH_EXPERT)
     assert str(polish.llm.base_url) == "http://127.0.0.1:8000/v1"
     assert polish.llm.api_key is None
     assert polish.llm.parameters == {"temperature": 0, "max_tokens": 1000}
 
-    for role in set(AgentRole) - {AgentRole.ARCHITECTURE, AgentRole.CODE_POLISH}:
+    for role in set(AgentRole) - {AgentRole.ARCHITECTURE_EXPERT, AgentRole.CODE_POLISH_EXPERT}:
         inherited = config.resolve(role)
         assert inherited.use_proxy is False
         assert inherited.llm.model_id == "root-model"

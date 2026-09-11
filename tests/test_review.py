@@ -9,10 +9,10 @@ from deep_review.models import (
     Finding,
     PrReviewContext,
     PullRequestTarget,
-    TicketCorrelationResult,
+    CrossPrValidationResult,
     TicketReviewContext,
 )
-from deep_review.review import _validate_consolidation, correlate_ticket, render_finding
+from deep_review.review import _validate_consolidation, validate_cross_prs, render_finding
 
 
 def finding(severity: str = "Minor") -> Finding:
@@ -30,26 +30,26 @@ def finding(severity: str = "Minor") -> Finding:
 
 def test_consolidation_preserves_selected_content_and_highest_severity() -> None:
     candidates = [
-        CandidateFinding(id="unit:1", finding=finding("Major")),
-        CandidateFinding(id="architecture:1", finding=finding("Minor")),
+        CandidateFinding(id="implementation_expert:1", finding=finding("Major")),
+        CandidateFinding(id="architecture_expert:1", finding=finding("Minor")),
     ]
     result = ConsolidationResult(
         selections=[
             {
-                "selected_id": "architecture:1",
-                "duplicate_ids": ["unit:1"],
+                "selected_id": "architecture_expert:1",
+                "duplicate_ids": ["implementation_expert:1"],
                 "severity": "Major",
             }
         ]
     )
     consolidated = _validate_consolidation(candidates, result)
-    assert consolidated[0].id == "architecture:1"
+    assert consolidated[0].id == "architecture_expert:1"
     assert consolidated[0].finding.severity == "Major"
     assert consolidated[0].finding.title == "Clear title"
 
 
 def test_consolidation_requires_every_candidate() -> None:
-    candidates = [CandidateFinding(id="unit:1", finding=finding())]
+    candidates = [CandidateFinding(id="implementation_expert:1", finding=finding())]
     with pytest.raises(WorkflowError, match="every candidate"):
         _validate_consolidation(candidates, ConsolidationResult(selections=[]))
 
@@ -63,7 +63,7 @@ def test_anchored_render_removes_only_location_line() -> None:
     assert "Evidence:" in rendered
 
 
-def test_ticket_correlation_rejects_unknown_target() -> None:
+def test_cross_pr_validator_rejects_unknown_target() -> None:
     def pull_request(pr_id: int) -> PrReviewContext:
         target = PullRequestTarget(
             id=pr_id,
@@ -85,8 +85,8 @@ def test_ticket_correlation_rejects_unknown_target() -> None:
     )
 
     class Agent:
-        def ticket_correlation(self, _: dict[str, object]) -> TicketCorrelationResult:
-            return TicketCorrelationResult(
+        def cross_pr_validator(self, _: dict[str, object]) -> CrossPrValidationResult:
+            return CrossPrValidationResult(
                 findings=[
                     {
                         "target": {"project": "PRJ", "repository": "service", "id": 99},
@@ -96,4 +96,4 @@ def test_ticket_correlation_rejects_unknown_target() -> None:
             )
 
     with pytest.raises(WorkflowError, match="unknown pull request"):
-        correlate_ticket(context, Agent())  # type: ignore[arg-type]
+        validate_cross_prs(context, Agent())  # type: ignore[arg-type]

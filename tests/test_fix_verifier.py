@@ -3,8 +3,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from deep_review.models import DiscoveryResult, PullRequestTarget, SecondaryDecision
-from deep_review.secondary import plan_reconciliation, reconcile
+from deep_review.models import DiscoveryResult, PullRequestTarget, FixVerifierDecision
+from deep_review.fix_verifier import plan_reconciliation, reconcile
 
 
 class SecondaryCommands:
@@ -36,11 +36,11 @@ class SecondaryCommands:
 
 
 class SecondaryAgent:
-    def secondary(self, _: dict[str, Any], __: Path) -> SecondaryDecision:
-        return SecondaryDecision(comment_id=7, action="resolve", evidence="The defect is fixed.")
+    def fix_verifier(self, _: dict[str, Any], __: Path) -> FixVerifierDecision:
+        return FixVerifierDecision(comment_id=7, action="resolve", evidence="The defect is fixed.")
 
 
-def test_secondary_resolves_and_verifies_each_comment() -> None:
+def test_fix_verifier_resolves_and_verifies_each_comment() -> None:
     commands = SecondaryCommands()
     result = reconcile(
         {"key": "ABC-123", "description": "Story"},
@@ -49,7 +49,7 @@ def test_secondary_resolves_and_verifies_each_comment() -> None:
         DiscoveryResult(
             reviewer={"username": "reviewer"},
             requestor={"username": "requestor"},
-            review_type="secondary",
+            review_type="fix_verifier",
         ),
         PullRequestTarget(
             id=3,
@@ -68,12 +68,12 @@ def test_secondary_resolves_and_verifies_each_comment() -> None:
     assert [name for name, _ in commands.calls].count("get_pull_request_comments") == 3
 
 
-def test_secondary_planning_does_not_mutate_comments() -> None:
+def test_fix_verifier_planning_does_not_mutate_comments() -> None:
     commands = SecondaryCommands()
     discovery = DiscoveryResult(
         reviewer={"username": "reviewer"},
         requestor={"username": "requestor"},
-        review_type="secondary",
+        review_type="fix_verifier",
     )
     target = PullRequestTarget(
         id=3,

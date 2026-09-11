@@ -13,13 +13,13 @@ class StrictModel(BaseModel):
 
 class AgentRole(StrEnum):
     DISCOVERY = "discovery"
-    SECONDARY = "secondary"
-    ARCHITECTURE = "architecture"
-    UNIT = "unit"
-    CODE_POLISH = "code_polish"
-    CONSOLIDATION = "consolidation"
+    FIX_VERIFIER = "fix_verifier"
+    ARCHITECTURE_EXPERT = "architecture_expert"
+    IMPLEMENTATION_EXPERT = "implementation_expert"
+    CODE_POLISH_EXPERT = "code_polish_expert"
+    CONSOLIDATOR = "consolidator"
     LOCATION_VERIFIER = "location_verifier"
-    TICKET_CORRELATION = "ticket_correlation"
+    CROSS_PR_VALIDATOR = "cross_pr_validator"
 
 
 class Person(StrictModel):
@@ -29,7 +29,7 @@ class Person(StrictModel):
 
 class ReviewType(StrEnum):
     PRIMARY = "primary"
-    SECONDARY = "secondary"
+    FIX_VERIFIER = "fix_verifier"
 
 
 class DiscoveryResult(StrictModel):
@@ -119,14 +119,14 @@ class ReviewResult(StrictModel):
         return self
 
 
-class SecondaryDecision(StrictModel):
+class FixVerifierDecision(StrictModel):
     comment_id: Annotated[int, Field(gt=0)]
     action: Literal["resolve", "reply", "no_action"]
     reply: str | None = None
     evidence: str = Field(min_length=1)
 
     @model_validator(mode="after")
-    def validate_reply(self) -> SecondaryDecision:
+    def validate_reply(self) -> FixVerifierDecision:
         if (self.action == "reply") != bool(self.reply and self.reply.strip()):
             raise ValueError("reply text is required only for the reply action")
         return self
@@ -143,7 +143,7 @@ class RoutedFinding(StrictModel):
     finding: Finding
 
 
-class TicketCorrelationResult(StrictModel):
+class CrossPrValidationResult(StrictModel):
     findings: list[RoutedFinding] = Field(default_factory=list)
     limitations: list[str] = Field(default_factory=list)
 
@@ -181,9 +181,9 @@ class PrReviewContext(StrictModel):
     status: Literal[
         "discovered", "prepared", "reviewed", "published", "skipped", "failed"
     ] = "discovered"
-    secondary_decisions: list[SecondaryDecision] = Field(default_factory=list)
+    fix_verifier_decisions: list[FixVerifierDecision] = Field(default_factory=list)
     existing_reviewer_comments: list[dict[str, Any]] = Field(default_factory=list)
-    secondary_status: Literal["No issues found", "Done"] | None = None
+    fix_verifier_status: Literal["No issues found", "Done"] | None = None
     specialist_results: dict[AgentRole, ReviewResult] = Field(default_factory=dict)
     candidates: list[CandidateFinding] = Field(default_factory=list)
     findings: list[CandidateFinding] = Field(default_factory=list)
@@ -212,7 +212,7 @@ class TicketReviewContext(StrictModel):
     requestor: Person
     review_type: ReviewType
     pull_requests: list[PrReviewContext] = Field(default_factory=list)
-    correlation: TicketCorrelationResult | None = None
+    correlation: CrossPrValidationResult | None = None
     failures: list[str] = Field(default_factory=list)
     status: Literal["running", "complete", "partial", "failed"] = "running"
 

@@ -23,8 +23,8 @@ from deep_review.models import (
     DiscoveryResult,
     LocationVerification,
     ReviewResult,
-    SecondaryDecision,
-    TicketCorrelationResult,
+    FixVerifierDecision,
+    CrossPrValidationResult,
 )
 
 
@@ -80,7 +80,7 @@ class FakeAgent:
                 requestor={"username": "requestor"},
                 review_type="primary",
             ),
-            SecondaryDecision: SecondaryDecision(
+            FixVerifierDecision: FixVerifierDecision(
                 comment_id=1,
                 action="resolve",
                 evidence="The defect is fixed.",
@@ -88,7 +88,7 @@ class FakeAgent:
             ReviewResult: ReviewResult(status="no_issues", coverage=["reviewed"]),
             ConsolidationResult: ConsolidationResult(selections=[]),
             LocationVerification: LocationVerification(decisions=[]),
-            TicketCorrelationResult: TicketCorrelationResult(),
+            CrossPrValidationResult: CrossPrValidationResult(),
         }
         return FakeResult(outputs[structured_output_model])
 
@@ -139,14 +139,14 @@ def runtime_config() -> DeepReviewConfig:
                 "parameters": {"temperature": 0, "max_tokens": 1000},
             },
             "agents": {
-                "architecture": {
+                "architecture_expert": {
                     "use_proxy": True,
                     "llm": {
-                        "model_id": "architecture-model",
+                        "model_id": "architecture_expert-model",
                         "parameters": {"max_tokens": 2000},
                     },
                 },
-                "unit": {"llm": {"api_key": None}},
+                "implementation_expert": {"llm": {"api_key": None}},
             },
         }
     )
@@ -194,7 +194,7 @@ def test_agent_invocations_own_distinct_direct_and_proxied_clients(
     monkeypatch.setattr(infrastructure, "OpenAIModel", FakeModel)
     monkeypatch.setattr(infrastructure, "Agent", FakeAgent)
     caplog.set_level(logging.INFO, logger=infrastructure.__name__)
-    for role in (AgentRole.ARCHITECTURE, AgentRole.UNIT):
+    for role in (AgentRole.ARCHITECTURE_EXPERT, AgentRole.IMPLEMENTATION_EXPERT):
         (tmp_path / f"{role.value}.md").write_text("prompt", encoding="utf-8")
     runner = StrandsAgentRunner(runtime_config(), FakeServers(), tmp_path)  # type: ignore[arg-type]
 
@@ -202,7 +202,7 @@ def test_agent_invocations_own_distinct_direct_and_proxied_clients(
         results = list(
             executor.map(
                 lambda method: method({}, tmp_path),
-                (runner.architecture, runner.unit),
+                (runner.architecture_expert, runner.implementation_expert),
             )
         )
 
@@ -226,7 +226,7 @@ def test_agent_invocations_own_distinct_direct_and_proxied_clients(
     assert all(client.closed for client in FakeOpenAIClient.instances)
     assert all(client.closed for client in FakeHttpClient.instances)
     by_model = {model["model_id"]: model for model in FakeModel.instances}
-    assert by_model["architecture-model"]["params"] == {
+    assert by_model["architecture_expert-model"]["params"] == {
         "temperature": 0,
         "max_tokens": 2000,
     }
@@ -239,8 +239,8 @@ def test_agent_invocations_own_distinct_direct_and_proxied_clients(
     }
     messages = {record.getMessage() for record in caplog.records}
     assert messages >= {
-        "Starting workflow step: Review architecture and design (agent: architecture)",
-        "Starting workflow step: Review unit-level correctness (agent: unit)",
+        "Starting workflow step: Review architecture and design (agent: architecture_expert)",
+        "Starting workflow step: Review implementation-level correctness (agent: implementation_expert)",
     }
 
 
@@ -262,13 +262,13 @@ def test_agent_runners_expose_only_their_required_tools(
     runner = StrandsAgentRunner(runtime_config(), servers, tmp_path)  # type: ignore[arg-type]
 
     runner.discovery({})
-    runner.secondary({}, tmp_path)
-    runner.architecture({}, tmp_path)
-    runner.unit({}, tmp_path)
-    runner.code_polish({}, tmp_path)
-    runner.consolidation({})
+    runner.fix_verifier({}, tmp_path)
+    runner.architecture_expert({}, tmp_path)
+    runner.implementation_expert({}, tmp_path)
+    runner.code_polish_expert({}, tmp_path)
+    runner.consolidator({})
     runner.location_verifier({}, tmp_path)
-    runner.ticket_correlation({})
+    runner.cross_pr_validator({})
 
     assert [instance["system_prompt"] for instance in FakeAgent.instances] == [
         role.value for role in AgentRole

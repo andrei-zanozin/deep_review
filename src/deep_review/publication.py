@@ -9,29 +9,29 @@ from deep_review.models import (
     CandidateFinding,
     DiscoveryResult,
     PullRequestTarget,
-    SecondaryDecision,
+    FixVerifierDecision,
 )
 from deep_review.repository import location_in_diff
 from deep_review.review import render_finding
-from deep_review.secondary import SecondaryStatus, apply_reconciliation
+from deep_review.fix_verifier import FixVerifierStatus, apply_reconciliation
 
 
 def publish(
     target: PullRequestTarget,
     findings: list[CandidateFinding],
-    secondary_status: SecondaryStatus | None,
+    fix_verifier_status: FixVerifierStatus | None,
     repository_root: Path,
     commands: Commands,
     agents: AgentRunner,
-    secondary_decisions: list[SecondaryDecision] | None = None,
+    fix_verifier_decisions: list[FixVerifierDecision] | None = None,
     discovery: DiscoveryResult | None = None,
-) -> tuple[bool, SecondaryStatus | None]:
+) -> tuple[bool, FixVerifierStatus | None]:
     diff = _preflight(target, findings, repository_root, commands, agents)
-    if secondary_decisions is not None:
+    if fix_verifier_decisions is not None:
         if discovery is None:
-            raise WorkflowError("secondary publication requires discovery context")
-        secondary_status = apply_reconciliation(
-            target, secondary_decisions, discovery, commands
+            raise WorkflowError("fix_verifier publication requires discovery context")
+        fix_verifier_status = apply_reconciliation(
+            target, fix_verifier_decisions, discovery, commands
         )
     if findings:
         if not diff:
@@ -51,7 +51,7 @@ def publish(
                 },
             )
 
-    needs_work = bool(findings) or secondary_status == "Done"
+    needs_work = bool(findings) or fix_verifier_status == "Done"
     commands.bitbucket(
         "set_review_status",
         {
@@ -59,7 +59,7 @@ def publish(
             "status": "NEEDS_WORK" if needs_work else "APPROVED",
         },
     )
-    return needs_work, secondary_status
+    return needs_work, fix_verifier_status
 
 
 def finish_jira(issue_key: str, requestor: str, issues_found: bool, commands: Commands) -> None:

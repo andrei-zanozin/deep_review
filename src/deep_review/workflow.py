@@ -26,8 +26,8 @@ from deep_review.models import (
 )
 from deep_review.publication import finish_jira, publish, report_incomplete_jira
 from deep_review.repository import discover_sibling_repositories, prepare_checkout
-from deep_review.review import consolidate, correlate_ticket, run_specialists
-from deep_review.secondary import plan_reconciliation
+from deep_review.review import consolidate, validate_cross_prs, run_specialists
+from deep_review.fix_verifier import plan_reconciliation
 
 LOGGER = logging.getLogger(__name__)
 
@@ -64,7 +64,7 @@ def execute_review(
 
     repositories = discover_sibling_repositories(start)
     _prepare_pull_requests(context, discovery, repositories, commands, agents)
-    _apply_ticket_correlation(context, agents)
+    _apply_cross_pr_validator(context, agents)
     published = _publish_pull_requests(context, discovery, commands, agents)
 
     if context.failures:
@@ -109,7 +109,7 @@ def _prepare_pull_requests(
             if pull_request.mode == "evidence_only":
                 continue
 
-            if context.review_type == ReviewType.SECONDARY:
+            if context.review_type == ReviewType.FIX_VERIFIER:
                 decisions, existing = plan_reconciliation(
                     context.issue,
                     context.jira_comments,
@@ -120,7 +120,7 @@ def _prepare_pull_requests(
                     commands,
                     agents,
                 )
-                pull_request.secondary_decisions = decisions
+                pull_request.fix_verifier_decisions = decisions
                 pull_request.existing_reviewer_comments = existing
 
             results, candidates = run_specialists(
@@ -148,12 +148,12 @@ def _related_pull_request(context: PrReviewContext) -> dict[str, object]:
     }
 
 
-def _apply_ticket_correlation(
+def _apply_cross_pr_validator(
     context: TicketReviewContext,
     agents: AgentRunner,
 ) -> None:
     try:
-        context.correlation = correlate_ticket(context, agents)
+        context.correlation = validate_cross_prs(context, agents)
         by_key = {
             (item.key.project, item.key.repository, item.key.id): item
             for item in context.pull_requests
@@ -163,7 +163,7 @@ def _apply_ticket_correlation(
                 (routed.target.project, routed.target.repository, routed.target.id)
             ]
             target.candidates.append(
-                CandidateFinding(id=f"ticket_correlation:{index}", finding=routed.finding)
+                CandidateFinding(id=f"cross_pr_validator:{index}", finding=routed.finding)
             )
     except WorkflowError as exc:
         context.failures.append(f"ticket correlation failed: {exc}")
@@ -191,20 +191,20 @@ def _publish_pull_requests(
                 _pull_request_label(pull_request),
                 len(pull_request.findings),
             )
-            issues_found, secondary_status = publish(
+            issues_found, fix_verifier_status = publish(
                 pull_request.target,
                 pull_request.findings,
                 None,
                 pull_request.repository.root,
                 commands,
                 agents,
-                pull_request.secondary_decisions
-                if context.review_type == ReviewType.SECONDARY
+                pull_request.fix_verifier_decisions
+                if context.review_type == ReviewType.FIX_VERIFIER
                 else None,
                 discovery,
             )
             pull_request.issues_found = issues_found
-            pull_request.secondary_status = secondary_status
+            pull_request.fix_verifier_status = fix_verifier_status
             pull_request.status = "published"
         except WorkflowError as exc:
             _fail_pull_request(context, pull_request, str(exc), "failed")

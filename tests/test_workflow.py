@@ -11,8 +11,8 @@ from deep_review.models import (
     DiscoveryResult,
     LocationVerification,
     ReviewResult,
-    SecondaryDecision,
-    TicketCorrelationResult,
+    FixVerifierDecision,
+    CrossPrValidationResult,
 )
 from deep_review.workflow import execute_review
 
@@ -77,17 +77,17 @@ class FakeAgents:
             review_type="primary",
         )
 
-    def secondary(self, _: dict[str, Any], __: Path) -> SecondaryDecision:
-        self.roles.append(AgentRole.SECONDARY)
-        return SecondaryDecision(comment_id=1, action="resolve", evidence="Fixed.")
+    def fix_verifier(self, _: dict[str, Any], __: Path) -> FixVerifierDecision:
+        self.roles.append(AgentRole.FIX_VERIFIER)
+        return FixVerifierDecision(comment_id=1, action="resolve", evidence="Fixed.")
 
-    def architecture(self, _: dict[str, Any], __: Path) -> ReviewResult:
-        self.roles.append(AgentRole.ARCHITECTURE)
+    def architecture_expert(self, _: dict[str, Any], __: Path) -> ReviewResult:
+        self.roles.append(AgentRole.ARCHITECTURE_EXPERT)
         if not self.has_finding:
-            return ReviewResult(status="no_issues", coverage=["architecture"])
+            return ReviewResult(status="no_issues", coverage=["architecture_expert"])
         return ReviewResult(
             status="findings",
-            coverage=["architecture"],
+            coverage=["architecture_expert"],
             findings=[
                 {
                     "severity": "Major",
@@ -102,20 +102,20 @@ class FakeAgents:
             ],
         )
 
-    def unit(self, _: dict[str, Any], __: Path) -> ReviewResult:
-        self.roles.append(AgentRole.UNIT)
-        return ReviewResult(status="no_issues", coverage=["unit"])
+    def implementation_expert(self, _: dict[str, Any], __: Path) -> ReviewResult:
+        self.roles.append(AgentRole.IMPLEMENTATION_EXPERT)
+        return ReviewResult(status="no_issues", coverage=["implementation_expert"])
 
-    def code_polish(self, _: dict[str, Any], __: Path) -> ReviewResult:
-        self.roles.append(AgentRole.CODE_POLISH)
-        return ReviewResult(status="no_issues", coverage=["code_polish"])
+    def code_polish_expert(self, _: dict[str, Any], __: Path) -> ReviewResult:
+        self.roles.append(AgentRole.CODE_POLISH_EXPERT)
+        return ReviewResult(status="no_issues", coverage=["code_polish_expert"])
 
-    def consolidation(self, _: dict[str, Any]) -> ConsolidationResult:
-        self.roles.append(AgentRole.CONSOLIDATION)
+    def consolidator(self, _: dict[str, Any]) -> ConsolidationResult:
+        self.roles.append(AgentRole.CONSOLIDATOR)
         return ConsolidationResult(
             selections=[
                 {
-                    "selected_id": "architecture:1",
+                    "selected_id": "architecture_expert:1",
                     "duplicate_ids": [],
                     "severity": "Major",
                 }
@@ -127,16 +127,16 @@ class FakeAgents:
         return LocationVerification(
             decisions=[
                 {
-                    "finding_id": "architecture:1",
+                    "finding_id": "architecture_expert:1",
                     "valid": True,
                     "reason": "The destination line contains the described value.",
                 }
             ]
         )
 
-    def ticket_correlation(self, _: dict[str, Any]) -> TicketCorrelationResult:
-        self.roles.append(AgentRole.TICKET_CORRELATION)
-        return TicketCorrelationResult()
+    def cross_pr_validator(self, _: dict[str, Any]) -> CrossPrValidationResult:
+        self.roles.append(AgentRole.CROSS_PR_VALIDATOR)
+        return CrossPrValidationResult()
 
 
 def test_primary_no_issues_approves_and_finishes_jira(git_repository: Path) -> None:
@@ -154,7 +154,7 @@ def test_primary_no_issues_approves_and_finishes_jira(git_repository: Path) -> N
     assert statuses == ["APPROVED"]
     jira_comment = next(args for server, name, args in commands.calls if name == "add_comment")
     assert jira_comment["body"] == "Hi [~requestor], review is done ✅"
-    assert AgentRole.CONSOLIDATION not in agents.roles
+    assert AgentRole.CONSOLIDATOR not in agents.roles
     assert AgentRole.LOCATION_VERIFIER not in agents.roles
 
 
@@ -248,9 +248,9 @@ class CapturingAgents(FakeAgents):
         super().__init__(False)
         self.payloads: dict[AgentRole, list[dict[str, Any]]] = {}
 
-    def ticket_correlation(self, payload: dict[str, Any]) -> TicketCorrelationResult:
-        self.payloads.setdefault(AgentRole.TICKET_CORRELATION, []).append(payload)
-        return super().ticket_correlation(payload)
+    def cross_pr_validator(self, payload: dict[str, Any]) -> CrossPrValidationResult:
+        self.payloads.setdefault(AgentRole.CROSS_PR_VALIDATOR, []).append(payload)
+        return super().cross_pr_validator(payload)
 
 
 def create_repository(path: Path, repository: str) -> str:
@@ -282,16 +282,16 @@ def test_ticket_context_correlates_reviewed_and_evidence_only_prs(tmp_path: Path
     assert result.pull_requests[0].status == "published"
     assert result.pull_requests[1].status == "prepared"
     assert set(result.pull_requests[0].specialist_results) == {
-        AgentRole.ARCHITECTURE,
-        AgentRole.UNIT,
-        AgentRole.CODE_POLISH,
+        AgentRole.ARCHITECTURE_EXPERT,
+        AgentRole.IMPLEMENTATION_EXPERT,
+        AgentRole.CODE_POLISH_EXPERT,
     }
-    correlation = agents.payloads[AgentRole.TICKET_CORRELATION][0]["pull_requests"]
+    correlation = agents.payloads[AgentRole.CROSS_PR_VALIDATOR][0]["pull_requests"]
     assert len(correlation) == 2
     assert set(correlation[0]["specialist_results"]) == {
-        "architecture",
-        "unit",
-        "code_polish",
+        "architecture_expert",
+        "implementation_expert",
+        "code_polish_expert",
     }
     assert correlation[1]["specialist_results"] == {}
     statuses = [call for call in commands.calls if call[1] == "set_review_status"]

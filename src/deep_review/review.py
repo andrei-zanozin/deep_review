@@ -15,11 +15,15 @@ from deep_review.models import (
     PullRequestTarget,
     ReviewResult,
     Severity,
-    TicketCorrelationResult,
+    CrossPrValidationResult,
     TicketReviewContext,
 )
 
-REVIEW_ROLES = (AgentRole.ARCHITECTURE, AgentRole.UNIT, AgentRole.CODE_POLISH)
+REVIEW_ROLES = (
+    AgentRole.ARCHITECTURE_EXPERT,
+    AgentRole.IMPLEMENTATION_EXPERT,
+    AgentRole.CODE_POLISH_EXPERT,
+)
 SEVERITY_RANK = {Severity.MINOR: 0, Severity.MAJOR: 1, Severity.CRITICAL: 2}
 
 
@@ -42,12 +46,14 @@ def run_specialists(
     }
     with ThreadPoolExecutor(max_workers=len(REVIEW_ROLES)) as executor:
         futures = {
-            AgentRole.ARCHITECTURE: executor.submit(
-                agents.architecture, deepcopy(payload), repository_root
+            AgentRole.ARCHITECTURE_EXPERT: executor.submit(
+                agents.architecture_expert, deepcopy(payload), repository_root
             ),
-            AgentRole.UNIT: executor.submit(agents.unit, deepcopy(payload), repository_root),
-            AgentRole.CODE_POLISH: executor.submit(
-                agents.code_polish, deepcopy(payload), repository_root
+            AgentRole.IMPLEMENTATION_EXPERT: executor.submit(
+                agents.implementation_expert, deepcopy(payload), repository_root
+            ),
+            AgentRole.CODE_POLISH_EXPERT: executor.submit(
+                agents.code_polish_expert, deepcopy(payload), repository_root
             ),
         }
     results: dict[AgentRole, ReviewResult] = {}
@@ -64,18 +70,18 @@ def run_specialists(
     return results, candidates
 
 
-def correlate_ticket(
+def validate_cross_prs(
     context: TicketReviewContext,
     agents: AgentRunner,
-) -> TicketCorrelationResult:
+) -> CrossPrValidationResult:
     available = [
         pull_request
         for pull_request in context.pull_requests
         if pull_request.status in {"prepared", "reviewed"}
     ]
     if len(available) < 2:
-        return TicketCorrelationResult()
-    result = agents.ticket_correlation(
+        return CrossPrValidationResult()
+    result = agents.cross_pr_validator(
         {
             "issue": deepcopy(context.issue),
             "jira_comments": deepcopy(context.jira_comments),
@@ -120,7 +126,7 @@ def consolidate(
 ) -> list[CandidateFinding]:
     if not candidates:
         return []
-    result = agents.consolidation(
+    result = agents.consolidator(
         {
             "candidates": [candidate.model_dump(mode="json") for candidate in candidates],
             "existing_reviewer_comments": existing_comments,
