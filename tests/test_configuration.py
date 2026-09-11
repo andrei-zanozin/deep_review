@@ -150,6 +150,15 @@ def test_rejects_unknown_agent_role(tmp_path: Path) -> None:
         )
 
 
+def test_rejects_removed_location_verifier_agent_role(tmp_path: Path) -> None:
+    source = BASE_CONFIG + "agents:\n  location_verifier:\n    use_proxy: false\n"
+    with pytest.raises(ConfigurationError, match="location_verifier"):
+        load_config(
+            write_config(tmp_path, source),
+            {"JIRA_PAT": "jira", "LLM_KEY": "key"},
+        )
+
+
 def test_resolves_inheritance_defaults_overrides_and_explicit_key_clearing(
     tmp_path: Path,
 ) -> None:

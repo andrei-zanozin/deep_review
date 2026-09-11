@@ -22,7 +22,6 @@ class AgentRole(StrEnum):
     IMPLEMENTATION_EXPERT = "implementation_expert"
     CODE_POLISH_EXPERT = "code_polish_expert"
     CONSOLIDATOR = "consolidator"
-    LOCATION_VERIFIER = "location_verifier"
     CROSS_PR_VALIDATOR = "cross_pr_validator"
 
 
@@ -162,16 +161,6 @@ class ConsolidationSelection(StrictModel):
 class ConsolidationResult(StrictModel):
     selections: list[ConsolidationSelection]
     existing_comment_duplicates: list[str] = Field(default_factory=list)
-
-
-class LocationDecision(StrictModel):
-    finding_id: str = Field(min_length=1)
-    valid: bool
-    reason: str = Field(min_length=1)
-
-
-class LocationVerification(StrictModel):
-    decisions: list[LocationDecision]
 
 
 class PrReviewContext(StrictModel):

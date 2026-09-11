@@ -24,7 +24,6 @@ from deep_review.models import (
     CrossPrValidationResult,
     DiscoveryResult,
     FixVerifierDecision,
-    LocationVerification,
     ReviewResult,
 )
 from deep_review.repository import repository_tools
@@ -40,7 +39,6 @@ AGENT_STEP_NAMES = {
     AgentRole.IMPLEMENTATION_EXPERT: "Review implementation-level correctness",
     AgentRole.CODE_POLISH_EXPERT: "Review code quality and maintainability",
     AgentRole.CONSOLIDATOR: "Consolidate review findings",
-    AgentRole.LOCATION_VERIFIER: "Verify finding locations",
     AgentRole.CROSS_PR_VALIDATOR: "Correlate findings across pull requests",
 }
 
@@ -79,10 +77,6 @@ class AgentRunner(Protocol):
     ) -> ReviewResult: ...
 
     def consolidator(self, context: dict[str, Any]) -> ConsolidationResult: ...
-
-    def location_verifier(
-        self, context: dict[str, Any], repository_root: Path
-    ) -> LocationVerification: ...
 
     def cross_pr_validator(self, context: dict[str, Any]) -> CrossPrValidationResult: ...
 
@@ -343,36 +337,6 @@ class StrandsAgentRunner:
                     result = await agent.invoke_async(
                         json.dumps(context, default=str, ensure_ascii=False),
                         structured_output_model=ConsolidationResult,
-                    )
-                except Exception as exc:
-                    raise WorkflowError(f"{role.value} agent failed: {exc}") from exc
-                if result.structured_output is None:
-                    raise WorkflowError(f"{role.value} agent returned no structured output")
-                return result.structured_output
-
-        return asyncio.run(invoke())
-
-    def location_verifier(
-        self, context: dict[str, Any], repository_root: Path
-    ) -> LocationVerification:
-        async def invoke() -> LocationVerification:
-            role = AgentRole.LOCATION_VERIFIER
-            async with self._model(role) as model:
-                agent = Agent(
-                    model=model,
-                    system_prompt=self._prompt(role),
-                    tools=repository_tools(repository_root),
-                    callback_handler=None,
-                )
-                try:
-                    LOGGER.info(
-                        "Starting workflow step: %s (agent: %s)",
-                        AGENT_STEP_NAMES[role],
-                        role.value,
-                    )
-                    result = await agent.invoke_async(
-                        json.dumps(context, default=str, ensure_ascii=False),
-                        structured_output_model=LocationVerification,
                     )
                 except Exception as exc:
                     raise WorkflowError(f"{role.value} agent failed: {exc}") from exc

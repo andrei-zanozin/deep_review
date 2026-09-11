@@ -23,7 +23,6 @@ from deep_review.models import (
     CrossPrValidationResult,
     DiscoveryResult,
     FixVerifierDecision,
-    LocationVerification,
     ReviewResult,
 )
 
@@ -87,7 +86,6 @@ class FakeAgent:
             ),
             ReviewResult: ReviewResult(status="no_issues", coverage=["reviewed"]),
             ConsolidationResult: ConsolidationResult(selections=[]),
-            LocationVerification: LocationVerification(decisions=[]),
             CrossPrValidationResult: CrossPrValidationResult(),
         }
         return FakeResult(outputs[structured_output_model])
@@ -268,7 +266,6 @@ def test_agent_runners_expose_only_their_required_tools(
     runner.implementation_expert({}, tmp_path)
     runner.code_polish_expert({}, tmp_path)
     runner.consolidator({})
-    runner.location_verifier({}, tmp_path)
     runner.cross_pr_validator({})
 
     assert [instance["system_prompt"] for instance in FakeAgent.instances] == [
@@ -281,7 +278,6 @@ def test_agent_runners_expose_only_their_required_tools(
         ["repository-tools"],
         ["repository-tools"],
         [],
-        ["repository-tools"],
         ["jira-tools", "bitbucket-tools"],
     ]
     assert servers.calls == [

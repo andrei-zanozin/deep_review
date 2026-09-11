@@ -223,7 +223,6 @@ def _publish_pull_requests(
                 pull_request.diff or "No changes.",
                 pull_request.repository.root,
                 commands,
-                agents,
                 pull_request.fix_verifier_decisions
                 if context.review_type == ReviewType.FIX_VERIFIER
                 else None,

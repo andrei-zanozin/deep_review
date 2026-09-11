@@ -13,7 +13,6 @@ from deep_review.models import (
     CrossPrValidationResult,
     DiscoveryResult,
     FixVerifierDecision,
-    LocationVerification,
     ReviewResult,
 )
 from deep_review.workflow import execute_review
@@ -73,7 +72,6 @@ class FakeAgents:
         self.has_finding = has_finding
         self.finding_line = finding_line
         self.roles: list[AgentRole] = []
-        self.location_payload: dict[str, Any] | None = None
 
     def discovery(self, _: dict[str, Any]) -> DiscoveryResult:
         self.roles.append(AgentRole.DISCOVERY)
@@ -128,21 +126,6 @@ class FakeAgents:
             ]
         )
 
-    def location_verifier(
-        self, payload: dict[str, Any], __: Path
-    ) -> LocationVerification:
-        self.roles.append(AgentRole.LOCATION_VERIFIER)
-        self.location_payload = payload
-        return LocationVerification(
-            decisions=[
-                {
-                    "finding_id": "architecture_expert:1",
-                    "valid": True,
-                    "reason": "The destination line contains the described value.",
-                }
-            ]
-        )
-
     def cross_pr_validator(self, _: dict[str, Any]) -> CrossPrValidationResult:
         self.roles.append(AgentRole.CROSS_PR_VALIDATOR)
         return CrossPrValidationResult()
@@ -164,7 +147,6 @@ def test_primary_no_issues_approves_and_finishes_jira(git_repository: Path) -> N
     jira_comment = next(args for server, name, args in commands.calls if name == "add_comment")
     assert jira_comment["body"] == "Hi [~requestor], review is done ✅"
     assert AgentRole.CONSOLIDATOR not in agents.roles
-    assert AgentRole.LOCATION_VERIFIER not in agents.roles
 
 
 def test_findings_are_preflighted_before_mocked_publication(
@@ -185,9 +167,6 @@ def test_findings_are_preflighted_before_mocked_publication(
         "preflighting finding location: id=architecture_expert:1, "
         "path=code.txt, line=2, side=destination, placement=inline"
     ) in [record.getMessage() for record in caplog.records]
-    assert agents.location_payload is not None
-    assert agents.location_payload["comparison_base"] == base
-
     comment = next(
         args for server, name, args in commands.calls if name == "add_pull_request_comment"
     )

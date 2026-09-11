@@ -6,7 +6,7 @@ from typing import Any
 
 from deep_review.errors import WorkflowError
 from deep_review.fix_verifier import FixVerifierStatus, apply_reconciliation
-from deep_review.infrastructure import AgentRunner, Commands
+from deep_review.infrastructure import Commands
 from deep_review.models import (
     CandidateFinding,
     DiscoveryResult,
@@ -17,7 +17,6 @@ from deep_review.repository import (
     finding_location_exists,
     location_in_diff,
     pull_request_diff,
-    pull_request_merge_base,
 )
 from deep_review.review import render_finding
 
@@ -31,11 +30,10 @@ def publish(
     diff: str,
     repository_root: Path,
     commands: Commands,
-    agents: AgentRunner,
     fix_verifier_decisions: list[FixVerifierDecision] | None = None,
     discovery: DiscoveryResult | None = None,
 ) -> tuple[bool, FixVerifierStatus | None]:
-    inline = _preflight(target, findings, diff, repository_root, commands, agents)
+    inline = _preflight(target, findings, repository_root, commands)
     if fix_verifier_decisions is not None:
         if discovery is None:
             raise WorkflowError("fix_verifier publication requires discovery context")
@@ -107,10 +105,8 @@ def report_incomplete_jira(
 def _preflight(
     target: PullRequestTarget,
     findings: list[CandidateFinding],
-    diff: str,
     repository_root: Path,
     commands: Commands,
-    agents: AgentRunner,
 ) -> list[bool]:
     current = commands.bitbucket("get_pull_request", target.mcp_arguments())
     if (
@@ -140,30 +136,6 @@ def _preflight(
         inline.append(is_inline)
     if invalid:
         raise WorkflowError(f"findings have invalid locations: {', '.join(invalid)}")
-
-    if not findings:
-        return inline
-
-    verification = agents.location_verifier(
-        {
-            "pull_request": target.model_dump(mode="json"),
-            "comparison_base": pull_request_merge_base(repository_root, target),
-            "diff": diff,
-            "findings": [candidate.model_dump(mode="json") for candidate in findings],
-        },
-        repository_root,
-    )
-    by_id = {decision.finding_id: decision for decision in verification.decisions}
-    expected = {candidate.id for candidate in findings}
-    if by_id.keys() != expected or len(by_id) != len(verification.decisions):
-        raise WorkflowError("location verification did not cover every finding exactly once")
-    failures = [
-        f"{finding_id}: {by_id[finding_id].reason}"
-        for finding_id in expected
-        if not by_id[finding_id].valid
-    ]
-    if failures:
-        raise WorkflowError(f"location verification failed: {'; '.join(sorted(failures))}")
     return inline
 
 
