@@ -7,7 +7,12 @@ from typing import Any, Literal
 from deep_review.discovery import all_pages
 from deep_review.errors import WorkflowError
 from deep_review.infrastructure import AgentRunner, Commands
-from deep_review.models import DiscoveryResult, FixVerifierDecision, PullRequestTarget
+from deep_review.models import (
+    DiscoveryResult,
+    FixVerifierDecision,
+    PullRequestTarget,
+    same_username,
+)
 
 FixVerifierStatus = Literal["No issues found", "Done"]
 
@@ -113,7 +118,7 @@ def _reviewer_roots(comments: list[dict[str, Any]], reviewer: str) -> list[dict[
         for comment in comments
         if not comment.get("resolved")
         and isinstance(comment.get("author"), dict)
-        and comment["author"].get("slug") == reviewer
+        and same_username(comment["author"].get("slug"), reviewer)
     ]
 
 
@@ -165,12 +170,12 @@ def _has_current_reviewer_reply(root: dict[str, Any], discovery: DiscoveryResult
     requestor_times = [
         reply.get("created_at", -1)
         for reply in replies
-        if _author(reply) == discovery.requestor.username
+        if same_username(_author(reply), discovery.requestor.username)
     ]
     reviewer_times = [
         reply.get("created_at", -1)
         for reply in replies
-        if _author(reply) == discovery.reviewer.username
+        if same_username(_author(reply), discovery.reviewer.username)
     ]
     if not requestor_times:
         return False

@@ -10,6 +10,7 @@ from deep_review.models import (
     PrReviewContext,
     PullRequestTarget,
     RepositoryIdentity,
+    same_username,
 )
 from deep_review.repository import discover_repository
 
@@ -104,7 +105,7 @@ def _validate_people(
     assignee = issue.get("assignee")
     jira_username = assignee.get("name") if isinstance(assignee, dict) else None
     jira_display_name = assignee.get("displayName") if isinstance(assignee, dict) else None
-    if not isinstance(assignee, dict) or jira_username != result.reviewer.username:
+    if not same_username(jira_username, result.reviewer.username):
         raise WorkflowError(
             "reviewer "
             f"(username={result.reviewer.username!r}, "
@@ -112,19 +113,19 @@ def _validate_people(
             "does not match Jira assignee "
             f"(username={jira_username!r}, display_name={jira_display_name!r})"
         )
-    authors = {
+    authors = [
         author.get("name")
         for comment in comments
         if isinstance((author := comment.get("author")), dict)
-    }
-    if result.requestor.username not in authors:
+    ]
+    if not any(same_username(author, result.requestor.username) for author in authors):
         raise WorkflowError("discovery requestor is not a Jira comment author")
 
 
 def _approved_by(pull_request: dict[str, Any], reviewer: str) -> bool:
     for participant in pull_request.get("reviewers", []):
         user = participant.get("user", {}) if isinstance(participant, dict) else {}
-        if user.get("slug") == reviewer and (
+        if same_username(user.get("slug"), reviewer) and (
             participant.get("status") == "APPROVED" or participant.get("approved") is True
         ):
             return True

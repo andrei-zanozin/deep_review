@@ -11,6 +11,16 @@ def _repository_identity_key(project: str, repository: str) -> tuple[str, str]:
     return project.casefold(), repository.casefold()
 
 
+def same_username(left: object, right: object) -> bool:
+    return (
+        isinstance(left, str)
+        and isinstance(right, str)
+        and bool(left.strip())
+        and bool(right.strip())
+        and left.casefold() == right.casefold()
+    )
+
+
 class StrictModel(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 

@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import pytest
 
-from deep_review.discovery import _target, _validate_people
+from deep_review.discovery import _approved_by, _target, _validate_people
 from deep_review.errors import WorkflowError
-from deep_review.models import DiscoveryResult
+from deep_review.models import DiscoveryResult, same_username
 
 
 def test_pull_request_target_preserves_head_and_base_commits() -> None:
@@ -44,3 +44,29 @@ def test_reviewer_mismatch_identifies_discovery_and_jira_users() -> None:
         "reviewer (username='discovered-user', display_name='Discovered User') "
         "does not match Jira assignee (username='jira-user', display_name='Jira User')"
     )
+
+
+def test_identity_checks_accept_case_variants_without_changing_usernames() -> None:
+    discovery = DiscoveryResult.model_validate(
+        {
+            "reviewer": {"username": "ZAO3FE"},
+            "requestor": {"username": "KFV1KOR"},
+            "review_type": "fix_verifier",
+        }
+    )
+
+    _validate_people(
+        {"assignee": {"name": "zao3fe"}},
+        [{"author": {"name": "kfv1kor"}}],
+        discovery,
+    )
+
+    assert discovery.reviewer.username == "ZAO3FE"
+    assert discovery.requestor.username == "KFV1KOR"
+    assert _approved_by(
+        {"reviewers": [{"user": {"slug": "zao3fe"}, "status": "APPROVED"}]},
+        discovery.reviewer.username,
+    )
+    assert not same_username(None, None)
+    assert not same_username("", "")
+    assert not same_username("zao3fe", "another-user")

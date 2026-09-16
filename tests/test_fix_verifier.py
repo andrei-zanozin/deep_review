@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, cast
 
-from deep_review.fix_verifier import plan_reconciliation, reconcile
+from deep_review.fix_verifier import _has_current_reviewer_reply, plan_reconciliation, reconcile
 from deep_review.infrastructure import AgentRunner
 from deep_review.models import DiscoveryResult, FixVerifierDecision, PullRequestTarget
 
@@ -49,7 +49,7 @@ def test_fix_verifier_resolves_and_verifies_each_comment() -> None:
         "diff --git a/code.py blk b/code.py",
         DiscoveryResult.model_validate(
             {
-                "reviewer": {"username": "reviewer"},
+                "reviewer": {"username": "REVIEWER"},
                 "requestor": {"username": "requestor"},
                 "review_type": "fix_verifier",
             }
@@ -70,6 +70,24 @@ def test_fix_verifier_resolves_and_verifies_each_comment() -> None:
     assert result == "No issues found"
     assert [name for name, _ in commands.calls].count("set_comment_resolved") == 1
     assert [name for name, _ in commands.calls].count("get_pull_request_comments") == 3
+
+
+def test_reply_authors_match_jira_usernames_regardless_of_case() -> None:
+    discovery = DiscoveryResult.model_validate(
+        {
+            "reviewer": {"username": "ZAO3FE"},
+            "requestor": {"username": "KFV1KOR"},
+            "review_type": "fix_verifier",
+        }
+    )
+    root = {
+        "replies": [
+            {"author": {"slug": "kfv1kor"}, "created_at": 1},
+            {"author": {"slug": "zao3fe"}, "created_at": 2},
+        ]
+    }
+
+    assert _has_current_reviewer_reply(root, discovery)
 
 
 def test_fix_verifier_planning_does_not_mutate_comments() -> None:
