@@ -31,6 +31,8 @@ best practices, minor preferences, unrelated debt, or speculative future problem
 
 Result discipline:
 
+Read the repository root `AGENTS.md` when present. Consider only guidance relevant to your review
+responsibility, and verify behavioral claims independently.
 Review only the assigned PR; ticket-wide correlation belongs to the cross-PR validator. Use the
 repository tools to inspect affected code beyond the diff when necessary. Report only verified defects
 introduced or materially exposed by the change, and identify the exact affected statement and verified
