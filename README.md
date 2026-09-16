@@ -58,9 +58,15 @@ cd /path/to/repository-to-review
 uv run --project /path/to/deep_review deep-review ABC-123
 ```
 
-Use the Jira issue key as the only argument. The workflow reads the issue and its comments, then
-searches for matching open pull requests. It reviews matching local checkouts, including eligible
-sibling checkouts, and verifies the pull-request head and base again before publishing.
+Use the Jira issue key as the only positional argument. The workflow reads the issue and its
+comments, then searches for matching open pull requests. It reviews matching local checkouts,
+including eligible sibling checkouts, and verifies the pull-request head and base again before
+publishing.
+
+Add `--verbose` to show LLM and tool-call diagnostics, MCP server output, and HTTP request lines.
+Call diagnostics are hidden by default, regardless of their logging level; workflow progress, LLM
+usage summaries, and final failures remain visible. HTTP request lines appear at `DEBUG` in verbose
+output.
 
 This command has external effects. For reviewed pull requests it can add finding comments, resolve
 or reply to earlier reviewer comments during a fix-verification review, and set the review status

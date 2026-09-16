@@ -275,7 +275,7 @@ def bounded_command(root: Path, command: Sequence[str], limit: int = 40_000) -> 
     return f"{output[:limit]}\n[Output truncated; narrow the request.]"
 
 
-def repository_tools(root: Path) -> Sequence[Any]:
+def repository_tools(root: Path) -> list[Any]:
     root = root.resolve()
     return [
         _list_files_tool(root),

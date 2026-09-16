@@ -3,7 +3,9 @@ from __future__ import annotations
 import logging
 from decimal import Decimal
 from types import SimpleNamespace
+from typing import cast
 
+from strands import Agent
 from strands.hooks import AfterInvocationEvent
 from strands.telemetry.metrics import EventLoopMetrics
 
@@ -84,7 +86,7 @@ def test_after_invocation_hook_records_usage_when_result_is_unavailable(caplog) 
     collector = UsageCollector()
     hook = UsageTrackingHooks(collector, "review-model", pricing())
     hook._after_invocation(
-        AfterInvocationEvent(agent=SimpleNamespace(event_loop_metrics=metrics))
+        AfterInvocationEvent(agent=cast(Agent, SimpleNamespace(event_loop_metrics=metrics)))
     )
 
     with caplog.at_level(logging.INFO, logger="deep_review.usage"):

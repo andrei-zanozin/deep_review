@@ -73,60 +73,74 @@ class FakeAgents:
         self.finding_line = finding_line
         self.roles: list[AgentRole] = []
 
-    def discovery(self, _: dict[str, Any]) -> DiscoveryResult:
+    def discovery(self, context: dict[str, Any]) -> DiscoveryResult:
         self.roles.append(AgentRole.DISCOVERY)
-        return DiscoveryResult(
-            reviewer={"username": "reviewer"},
-            requestor={"username": "requestor"},
-            review_type="primary",
+        return DiscoveryResult.model_validate(
+            {
+                "reviewer": {"username": "reviewer"},
+                "requestor": {"username": "requestor"},
+                "review_type": "primary",
+            }
         )
 
-    def fix_verifier(self, _: dict[str, Any], __: Path) -> FixVerifierDecision:
+    def fix_verifier(
+        self, context: dict[str, Any], repository_root: Path
+    ) -> FixVerifierDecision:
         self.roles.append(AgentRole.FIX_VERIFIER)
         return FixVerifierDecision(comment_id=1, action="resolve", evidence="Fixed.")
 
-    def architecture_expert(self, _: dict[str, Any], __: Path) -> ReviewResult:
+    def architecture_expert(
+        self, context: dict[str, Any], repository_root: Path
+    ) -> ReviewResult:
         self.roles.append(AgentRole.ARCHITECTURE_EXPERT)
         if not self.has_finding:
             return ReviewResult(status="no_issues", coverage=["architecture_expert"])
-        return ReviewResult(
-            status="findings",
-            coverage=["architecture_expert"],
-            findings=[
-                {
-                    "severity": "Major",
-                    "title": "Bad added value",
-                    "path": "code.txt",
-                    "line": self.finding_line,
-                    "side": "destination",
-                    "problem_and_impact": "The value breaks the required behavior.",
-                    "suggested_fix": "Use the required value.",
-                    "evidence": "The added line contains the invalid value.",
-                }
-            ],
+        return ReviewResult.model_validate(
+            {
+                "status": "findings",
+                "coverage": ["architecture_expert"],
+                "findings": [
+                    {
+                        "severity": "Major",
+                        "title": "Bad added value",
+                        "path": "code.txt",
+                        "line": self.finding_line,
+                        "side": "destination",
+                        "problem_and_impact": "The value breaks the required behavior.",
+                        "suggested_fix": "Use the required value.",
+                        "evidence": "The added line contains the invalid value.",
+                    }
+                ],
+            }
         )
 
-    def implementation_expert(self, _: dict[str, Any], __: Path) -> ReviewResult:
+    def implementation_expert(
+        self, context: dict[str, Any], repository_root: Path
+    ) -> ReviewResult:
         self.roles.append(AgentRole.IMPLEMENTATION_EXPERT)
         return ReviewResult(status="no_issues", coverage=["implementation_expert"])
 
-    def code_polish_expert(self, _: dict[str, Any], __: Path) -> ReviewResult:
+    def code_polish_expert(
+        self, context: dict[str, Any], repository_root: Path
+    ) -> ReviewResult:
         self.roles.append(AgentRole.CODE_POLISH_EXPERT)
         return ReviewResult(status="no_issues", coverage=["code_polish_expert"])
 
-    def consolidator(self, _: dict[str, Any]) -> ConsolidationResult:
+    def consolidator(self, context: dict[str, Any]) -> ConsolidationResult:
         self.roles.append(AgentRole.CONSOLIDATOR)
-        return ConsolidationResult(
-            selections=[
-                {
-                    "selected_id": "architecture_expert:1",
-                    "duplicate_ids": [],
-                    "severity": "Major",
-                }
-            ]
+        return ConsolidationResult.model_validate(
+            {
+                "selections": [
+                    {
+                        "selected_id": "architecture_expert:1",
+                        "duplicate_ids": [],
+                        "severity": "Major",
+                    }
+                ]
+            }
         )
 
-    def cross_pr_validator(self, _: dict[str, Any]) -> CrossPrValidationResult:
+    def cross_pr_validator(self, context: dict[str, Any]) -> CrossPrValidationResult:
         self.roles.append(AgentRole.CROSS_PR_VALIDATOR)
         return CrossPrValidationResult()
 
@@ -319,9 +333,9 @@ class CapturingAgents(FakeAgents):
         super().__init__(False)
         self.payloads: dict[AgentRole, list[dict[str, Any]]] = {}
 
-    def cross_pr_validator(self, payload: dict[str, Any]) -> CrossPrValidationResult:
-        self.payloads.setdefault(AgentRole.CROSS_PR_VALIDATOR, []).append(payload)
-        return super().cross_pr_validator(payload)
+    def cross_pr_validator(self, context: dict[str, Any]) -> CrossPrValidationResult:
+        self.payloads.setdefault(AgentRole.CROSS_PR_VALIDATOR, []).append(context)
+        return super().cross_pr_validator(context)
 
 
 def create_repository(path: Path, repository: str, project: str = "PRJ") -> str:

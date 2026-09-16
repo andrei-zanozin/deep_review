@@ -7,7 +7,7 @@ import pytest
 from conftest import run_git
 
 from deep_review.errors import WorkflowError
-from deep_review.models import Finding, PullRequestTarget
+from deep_review.models import Finding, PullRequestTarget, Severity, Side
 from deep_review.repository import (
     discover_repository,
     discover_sibling_repositories,
@@ -119,11 +119,11 @@ def test_location_must_be_an_actual_changed_line(git_repository: Path) -> None:
     run_git(git_repository, "commit", "-m", "change")
     diff = run_git(git_repository, "diff", base, "HEAD") + "\n"
     finding = Finding(
-        severity="Major",
+        severity=Severity.MAJOR,
         title="Changed line",
         path="code.txt",
         line=2,
-        side="destination",
+        side=Side.DESTINATION,
         problem_and_impact="The added line has a problem.",
         suggested_fix="Correct it.",
         evidence="The diff adds the line.",
@@ -162,11 +162,11 @@ def test_local_location_validation_has_no_context_distance_limit(
         reviewed_base=base,
     )
     finding = Finding(
-        severity="Major",
+        severity=Severity.MAJOR,
         title="Distant existing line",
         path="code.txt",
         line=1_500,
-        side="destination",
+        side=Side.DESTINATION,
         problem_and_impact="The line provides relevant evidence.",
         suggested_fix="Correct the affected behavior.",
         evidence="The line exists at the reviewed head.",
@@ -209,11 +209,11 @@ def test_local_diff_validates_late_added_line_and_new_file_line(
     assert "added line 395" in pull_request_diff(git_repository, target)
     for path, line in (("production.txt", 395), ("new-test.txt", 18)):
         finding = Finding(
-            severity="Major",
+            severity=Severity.MAJOR,
             title="Changed line",
             path=path,
             line=line,
-            side="destination",
+            side=Side.DESTINATION,
             problem_and_impact="The changed line has a problem.",
             suggested_fix="Correct it.",
             evidence="The line is added by the pull request.",
@@ -243,11 +243,11 @@ def test_local_diff_classifies_removed_and_unchanged_source_lines(
         reviewed_base=base,
     )
     removed = Finding(
-        severity="Major",
+        severity=Severity.MAJOR,
         title="Removed line",
         path="code.txt",
         line=1,
-        side="source",
+        side=Side.SOURCE,
         problem_and_impact="The removed behavior is required.",
         suggested_fix="Restore it.",
         evidence="The pull request removes the line.",
@@ -276,11 +276,11 @@ def test_binary_finding_location_is_invalid(git_repository: Path) -> None:
         reviewed_base=head,
     )
     finding = Finding(
-        severity="Major",
+        severity=Severity.MAJOR,
         title="Binary location",
         path="binary.dat",
         line=1,
-        side="destination",
+        side=Side.DESTINATION,
         problem_and_impact="Binary content cannot identify a text line.",
         suggested_fix="Use a text-file location.",
         evidence="The file contains binary data.",

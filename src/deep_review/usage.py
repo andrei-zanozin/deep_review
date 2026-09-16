@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import logging
 from collections import defaultdict
+from collections.abc import Mapping
 from dataclasses import dataclass
 from decimal import Decimal
 from threading import Lock
-from typing import Any
+from typing import Any, cast
 
-from strands.hooks import AfterInvocationEvent, HookRegistry
+from strands.hooks import AfterInvocationEvent, HookProvider, HookRegistry
 
 from deep_review.configuration import TokenPricing
 
@@ -34,7 +35,7 @@ class UsageCollector:
         self,
         model_id: str,
         pricing: TokenPricing | None,
-        usage: dict[str, Any],
+        usage: Mapping[str, Any],
     ) -> None:
         record = UsageRecord(
             model_id=model_id,
@@ -73,15 +74,23 @@ class UsageCollector:
             usage = _sum_usage(model_records)
             costs = [_cost(record) for record in model_records]
             all_costs.extend(costs)
-            model_cost = sum(costs) if all(cost is not None for cost in costs) else None
+            model_cost = (
+                sum(cast(list[Decimal], costs), Decimal(0))
+                if all(cost is not None for cost in costs)
+                else None
+            )
             LOGGER.info(_summary_line("LLM usage", model_id, usage, model_cost))
             totals.add(usage)
 
-        total_cost = sum(all_costs) if all(cost is not None for cost in all_costs) else None
+        total_cost = (
+            sum(cast(list[Decimal], all_costs), Decimal(0))
+            if all(cost is not None for cost in all_costs)
+            else None
+        )
         LOGGER.info(_summary_line("LLM usage total", None, totals, total_cost))
 
 
-class UsageTrackingHooks:
+class UsageTrackingHooks(HookProvider):
     def __init__(
         self,
         collector: UsageCollector,
@@ -92,7 +101,7 @@ class UsageTrackingHooks:
         self._model_id = model_id
         self._pricing = pricing
 
-    def register_hooks(self, registry: HookRegistry) -> None:
+    def register_hooks(self, registry: HookRegistry, **kwargs: Any) -> None:
         registry.add_callback(AfterInvocationEvent, self._after_invocation)
 
     def _after_invocation(self, event: AfterInvocationEvent) -> None:

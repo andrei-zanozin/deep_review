@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
+from collections.abc import AsyncIterator
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import asynccontextmanager
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -20,7 +23,7 @@ from deep_review.infrastructure import (
     StrandsAgentRunner,
     _tool_value,
 )
-from deep_review.logging_config import API_LOG_CATEGORY, LOG_CATEGORY_ATTRIBUTE
+from deep_review.logging_config import API_LOG_CATEGORY, LOG_CATEGORY_ATTRIBUTE, TOOL_LOG_CATEGORY
 from deep_review.models import (
     AgentRole,
     ConsolidationResult,
@@ -79,10 +82,12 @@ class FakeAgent:
     ) -> FakeResult:
         await asyncio.sleep(0)
         outputs = {
-            DiscoveryResult: DiscoveryResult(
-                reviewer={"username": "reviewer"},
-                requestor={"username": "requestor"},
-                review_type="primary",
+            DiscoveryResult: DiscoveryResult.model_validate(
+                {
+                    "reviewer": {"username": "reviewer"},
+                    "requestor": {"username": "requestor"},
+                    "review_type": "primary",
+                }
             ),
             FixVerifierDecision: FixVerifierDecision(
                 comment_id=1,
@@ -165,23 +170,29 @@ def test_server_factory_splits_commands_and_forwards_only_configured_environment
             captured.append((transport(), tool_filters))
 
     monkeypatch.setattr(infrastructure, "MCPClient", FakeMCPClient)
-    monkeypatch.setattr(infrastructure, "stdio_client", lambda parameters: parameters)
+    monkeypatch.setattr(
+        infrastructure,
+        "_logged_stdio_client",
+        lambda parameters, **kwargs: (parameters, kwargs),
+    )
     monkeypatch.setenv("AMBIENT_SECRET", "must-not-be-forwarded")
 
-    servers = McpFactory(runtime_config().mcp, tmp_path)
+    servers = McpFactory(runtime_config().mcp, tmp_path, verbose=True)
     servers.jira({"get_issue"})
     servers.bitbucket()
 
-    jira, jira_filters = captured[0]
-    bitbucket, bitbucket_filters = captured[1]
+    (jira, jira_options), jira_filters = captured[0]
+    (bitbucket, bitbucket_options), bitbucket_filters = captured[1]
     assert (jira.command, jira.args) == ("jira-command", ["--stdio"])
     assert jira.env == {"ONLY_JIRA": "jira-value"}
     assert jira.cwd == tmp_path.resolve()
     assert jira_filters == {"allowed": ["get_issue"]}
+    assert jira_options == {"source": "jira", "verbose": True}
     assert (bitbucket.command, bitbucket.args) == ("bitbucket-command", [])
     assert bitbucket.env == {"ONLY_BITBUCKET": "bitbucket-value"}
     assert bitbucket.cwd == tmp_path.resolve()
     assert bitbucket_filters is None
+    assert bitbucket_options == {"source": "bitbucket", "verbose": True}
 
 
 def test_agent_invocations_own_distinct_direct_and_proxied_clients(
@@ -332,7 +343,7 @@ def test_direct_mcp_calls_log_boundaries_without_payloads(
 
     with caplog.at_level(logging.INFO, logger=infrastructure.__name__):
         value = McpCommands._call(  # type: ignore[arg-type]
-            SuccessfulClient(),
+            cast(Any, SuccessfulClient()),
             "get_issue",
             {"token": "do-not-log-this"},
             source="jira",
@@ -346,7 +357,7 @@ def test_direct_mcp_calls_log_boundaries_without_payloads(
     )
     assert "do-not-log-this" not in "\n".join(messages)
     assert all(
-        getattr(record, LOG_CATEGORY_ATTRIBUTE) == API_LOG_CATEGORY
+        getattr(record, LOG_CATEGORY_ATTRIBUTE) == TOOL_LOG_CATEGORY
         for record in caplog.records
     )
 
@@ -369,6 +380,45 @@ def test_failed_mcp_call_logs_an_error_completion(
     assert "status=error" in completion.getMessage()
 
 
+@pytest.mark.parametrize("verbose", [False, True])
+def test_mcp_stderr_is_hidden_by_default_and_http_requests_are_debug_when_verbose(
+    verbose: bool,
+    monkeypatch: Any,
+    caplog: pytest.LogCaptureFixture,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    @asynccontextmanager
+    async def fake_stdio_client(_: Any, *, errlog: Any) -> AsyncIterator[Any]:
+        os.write(errlog.fileno(), b'HTTP Request: GET https://example.test/ "HTTP/1.1 200 "\n')
+        os.write(errlog.fileno(), b"MCP server error\n")
+        yield (object(), object())
+
+    monkeypatch.setattr(infrastructure, "stdio_client", fake_stdio_client)
+
+    async def invoke() -> None:
+        async with infrastructure._logged_stdio_client(
+            infrastructure.StdioServerParameters(command="unused"),
+            source="bitbucket",
+            verbose=verbose,
+        ):
+            pass
+
+    with caplog.at_level(logging.DEBUG, logger=infrastructure.__name__):
+        asyncio.run(invoke())
+
+    messages = [record.getMessage() for record in caplog.records]
+    stderr = capsys.readouterr().err
+    if verbose:
+        assert messages == [
+            'MCP bitbucket: HTTP Request: GET https://example.test/ "HTTP/1.1 200 "'
+        ]
+        assert caplog.records[0].levelno == logging.DEBUG
+        assert stderr == "MCP server error\n"
+    else:
+        assert messages == []
+        assert stderr == ""
+
+
 def test_agent_hooks_log_llm_and_tool_boundaries(
     monkeypatch: Any,
     caplog: pytest.LogCaptureFixture,
@@ -378,18 +428,21 @@ def test_agent_hooks_log_llm_and_tool_boundaries(
     hooks = ApiCallLoggingHooks(AgentRole.ARCHITECTURE_EXPERT, "review-model")
 
     with caplog.at_level(logging.INFO, logger=infrastructure.__name__):
-        hooks._before_model_call(None)  # type: ignore[arg-type]
-        hooks._after_model_call(SimpleNamespace(exception=None))  # type: ignore[arg-type]
-        hooks._before_tool_call(  # type: ignore[arg-type]
-            SimpleNamespace(tool_use={"toolUseId": "tool-1", "name": "read_file"})
+        hooks._before_model_call(cast(Any, None))
+        hooks._after_model_call(cast(Any, SimpleNamespace(exception=None)))
+        hooks._before_tool_call(
+            cast(Any, SimpleNamespace(tool_use={"toolUseId": "tool-1", "name": "read_file"}))
         )
-        hooks._after_tool_call(  # type: ignore[arg-type]
-            SimpleNamespace(
-                tool_use={"toolUseId": "tool-1", "name": "read_file"},
-                exception=None,
-                cancel_message=None,
-                result={"status": "success"},
-                duration=0.25,
+        hooks._after_tool_call(
+            cast(
+                Any,
+                SimpleNamespace(
+                    tool_use={"toolUseId": "tool-1", "name": "read_file"},
+                    exception=None,
+                    cancel_message=None,
+                    result={"status": "success"},
+                    duration=0.25,
+                ),
             )
         )
 
@@ -401,3 +454,46 @@ def test_agent_hooks_log_llm_and_tool_boundaries(
         "Tool call finished: agent=architecture_expert, tool=read_file, "
         "status=success, duration=0.250s",
     ]
+    assert [getattr(record, LOG_CATEGORY_ATTRIBUTE) for record in caplog.records] == [
+        API_LOG_CATEGORY,
+        API_LOG_CATEGORY,
+        TOOL_LOG_CATEGORY,
+        TOOL_LOG_CATEGORY,
+    ]
+
+
+def test_agent_error_result_keeps_error_level_and_tool_category(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    hooks = ApiCallLoggingHooks(AgentRole.ARCHITECTURE_EXPERT, "review-model")
+    event = SimpleNamespace(
+        tool_use={"toolUseId": "tool-1", "name": "read_file"},
+        exception=None,
+        cancel_message=None,
+        result={"status": "error"},
+        duration=0.25,
+    )
+
+    with caplog.at_level(logging.INFO, logger=infrastructure.__name__):
+        hooks._after_tool_call(event)  # type: ignore[arg-type]
+
+    assert len(caplog.records) == 1
+    assert caplog.records[0].levelno == logging.ERROR
+    assert getattr(caplog.records[0], LOG_CATEGORY_ATTRIBUTE) == TOOL_LOG_CATEGORY
+    assert "status=error" in caplog.records[0].getMessage()
+
+
+def test_model_error_keeps_error_level_and_api_category(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    hooks = ApiCallLoggingHooks(AgentRole.ARCHITECTURE_EXPERT, "review-model")
+
+    with caplog.at_level(logging.INFO, logger=infrastructure.__name__):
+        hooks._after_model_call(
+            cast(Any, SimpleNamespace(exception=RuntimeError("model failed")))
+        )
+
+    assert len(caplog.records) == 1
+    assert caplog.records[0].levelno == logging.ERROR
+    assert getattr(caplog.records[0], LOG_CATEGORY_ATTRIBUTE) == API_LOG_CATEGORY
+    assert "status=error" in caplog.records[0].getMessage()

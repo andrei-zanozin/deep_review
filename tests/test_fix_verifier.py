@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from deep_review.fix_verifier import plan_reconciliation, reconcile
+from deep_review.infrastructure import AgentRunner
 from deep_review.models import DiscoveryResult, FixVerifierDecision, PullRequestTarget
 
 
@@ -46,10 +47,12 @@ def test_fix_verifier_resolves_and_verifies_each_comment() -> None:
         {"key": "ABC-123", "description": "Story"},
         [],
         "diff --git a/code.py blk b/code.py",
-        DiscoveryResult(
-            reviewer={"username": "reviewer"},
-            requestor={"username": "requestor"},
-            review_type="fix_verifier",
+        DiscoveryResult.model_validate(
+            {
+                "reviewer": {"username": "reviewer"},
+                "requestor": {"username": "requestor"},
+                "review_type": "fix_verifier",
+            }
         ),
         PullRequestTarget(
             id=3,
@@ -62,7 +65,7 @@ def test_fix_verifier_resolves_and_verifies_each_comment() -> None:
         ),
         Path("."),
         commands,
-        SecondaryAgent(),
+        cast(AgentRunner, SecondaryAgent()),
     )
     assert result == "No issues found"
     assert [name for name, _ in commands.calls].count("set_comment_resolved") == 1
@@ -71,10 +74,12 @@ def test_fix_verifier_resolves_and_verifies_each_comment() -> None:
 
 def test_fix_verifier_planning_does_not_mutate_comments() -> None:
     commands = SecondaryCommands()
-    discovery = DiscoveryResult(
-        reviewer={"username": "reviewer"},
-        requestor={"username": "requestor"},
-        review_type="fix_verifier",
+    discovery = DiscoveryResult.model_validate(
+        {
+            "reviewer": {"username": "reviewer"},
+            "requestor": {"username": "requestor"},
+            "review_type": "fix_verifier",
+        }
     )
     target = PullRequestTarget(
         id=3,
@@ -94,7 +99,7 @@ def test_fix_verifier_planning_does_not_mutate_comments() -> None:
         target,
         Path("."),
         commands,
-        SecondaryAgent(),
+        cast(AgentRunner, SecondaryAgent()),
     )
 
     assert [decision.action for decision in decisions] == ["resolve"]

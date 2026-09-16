@@ -23,10 +23,12 @@ def test_pull_request_target_preserves_head_and_base_commits() -> None:
 
 
 def test_reviewer_mismatch_identifies_discovery_and_jira_users() -> None:
-    discovery = DiscoveryResult(
-        reviewer={"username": "discovered-user", "display_name": "Discovered User"},
-        requestor={"username": "requestor"},
-        review_type="primary",
+    discovery = DiscoveryResult.model_validate(
+        {
+            "reviewer": {"username": "discovered-user", "display_name": "Discovered User"},
+            "requestor": {"username": "requestor"},
+            "review_type": "primary",
+        }
     )
     issue = {
         "assignee": {

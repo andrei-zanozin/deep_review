@@ -3,6 +3,8 @@ from __future__ import annotations
 import io
 import logging
 import re
+import subprocess
+import sys
 
 import pytest
 
@@ -60,3 +62,49 @@ def test_color_requires_a_terminal_and_honors_no_color() -> None:
     assert _color_enabled(TerminalBuffer(), {})
     assert not _color_enabled(TerminalBuffer(), {"NO_COLOR": "1"})
     assert not _color_enabled(io.StringIO(), {})
+
+
+@pytest.mark.parametrize("verbose", [False, True])
+def test_logging_visibility_keeps_call_severity_and_relabels_http_requests(verbose: bool) -> None:
+    script = """
+import logging
+import sys
+from deep_review.logging_config import api_log_context, configure_logging, tool_log_context
+
+configure_logging(verbose=sys.argv[1] == "1")
+logging.getLogger("deep_review.workflow").info("workflow progress")
+logging.getLogger("deep_review.infrastructure").info("LLM call started", extra=api_log_context())
+logging.getLogger("deep_review.infrastructure").error("LLM call failed", extra=api_log_context())
+logging.getLogger("deep_review.infrastructure").info("tool started", extra=tool_log_context())
+logging.getLogger("deep_review.infrastructure").error("tool failed", extra=tool_log_context())
+logging.getLogger("strands.tools.executors._executor").error("framework tool failed")
+logging.getLogger("mcp.client").error("MCP client failed")
+logging.getLogger("httpx").info('HTTP Request: GET https://example.test/ "HTTP/1.1 200 "')
+logging.getLogger("deep_review.usage").info("LLM usage total")
+logging.getLogger("deep_review.cli").error("Failed: review aborted")
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", script, str(int(verbose))],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+    assert "INFO workflow progress" in result.stderr
+    assert "INFO LLM usage total" in result.stderr
+    assert "ERROR Failed: review aborted" in result.stderr
+    if verbose:
+        assert "INFO LLM call started" in result.stderr
+        assert "ERROR LLM call failed" in result.stderr
+        assert "INFO tool started" in result.stderr
+        assert "ERROR tool failed" in result.stderr
+        assert "ERROR framework tool failed" in result.stderr
+        assert "ERROR MCP client failed" in result.stderr
+        assert "DEBUG HTTP Request: GET https://example.test/" in result.stderr
+    else:
+        assert "LLM call started" not in result.stderr
+        assert "LLM call failed" not in result.stderr
+        assert "tool started" not in result.stderr
+        assert "tool failed" not in result.stderr
+        assert "MCP client failed" not in result.stderr
+        assert "HTTP Request:" not in result.stderr

@@ -37,11 +37,11 @@ from deep_review.usage import UsageCollector
 LOGGER = logging.getLogger(__name__)
 
 
-def run_review(issue: str) -> TicketReviewContext:
+def run_review(issue: str, *, verbose: bool = False) -> TicketReviewContext:
     """Run a review for the repository containing the current directory."""
     config_path = project_config_path()
     config = load_config(config_path)
-    servers = McpFactory(config.mcp, config_path.parent)
+    servers = McpFactory(config.mcp, config_path.parent, verbose=verbose)
     usage = UsageCollector()
     agents = runtime_agent_runner(config, servers, usage)
     try:

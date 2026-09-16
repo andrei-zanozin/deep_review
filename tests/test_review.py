@@ -8,8 +8,12 @@ from deep_review.models import (
     ConsolidationResult,
     CrossPrValidationResult,
     Finding,
+    Person,
     PrReviewContext,
     PullRequestTarget,
+    ReviewType,
+    Severity,
+    Side,
     TicketReviewContext,
 )
 from deep_review.review import _validate_consolidation, render_finding, validate_cross_prs
@@ -17,11 +21,11 @@ from deep_review.review import _validate_consolidation, render_finding, validate
 
 def finding(severity: str = "Minor") -> Finding:
     return Finding(
-        severity=severity,
+        severity=Severity(severity),
         title="Clear title",
         path="src/code.py",
         line=8,
-        side="destination",
+        side=Side.DESTINATION,
         problem_and_impact="The behavior is incorrect and callers fail.",
         suggested_fix="Return the correct value.",
         evidence="The changed branch always returns false.",
@@ -33,14 +37,16 @@ def test_consolidation_preserves_selected_content_and_highest_severity() -> None
         CandidateFinding(id="implementation_expert:1", finding=finding("Major")),
         CandidateFinding(id="architecture_expert:1", finding=finding("Minor")),
     ]
-    result = ConsolidationResult(
-        selections=[
-            {
-                "selected_id": "architecture_expert:1",
-                "duplicate_ids": ["implementation_expert:1"],
-                "severity": "Major",
-            }
-        ]
+    result = ConsolidationResult.model_validate(
+        {
+            "selections": [
+                {
+                    "selected_id": "architecture_expert:1",
+                    "duplicate_ids": ["implementation_expert:1"],
+                    "severity": "Major",
+                }
+            ]
+        }
     )
     consolidated = _validate_consolidation(candidates, result)
     assert consolidated[0].id == "architecture_expert:1"
@@ -53,14 +59,16 @@ def test_consolidation_derives_highest_severity_when_agent_downgrades_group() ->
         CandidateFinding(id="implementation_expert:1", finding=finding("Major")),
         CandidateFinding(id="architecture_expert:1", finding=finding("Minor")),
     ]
-    result = ConsolidationResult(
-        selections=[
-            {
-                "selected_id": "architecture_expert:1",
-                "duplicate_ids": ["implementation_expert:1"],
-                "severity": "Minor",
-            }
-        ]
+    result = ConsolidationResult.model_validate(
+        {
+            "selections": [
+                {
+                    "selected_id": "architecture_expert:1",
+                    "duplicate_ids": ["implementation_expert:1"],
+                    "severity": "Minor",
+                }
+            ]
+        }
     )
 
     consolidated = _validate_consolidation(candidates, result)
@@ -99,21 +107,23 @@ def test_cross_pr_validator_rejects_unknown_target() -> None:
     context = TicketReviewContext(
         issue_key="ABC-123",
         issue={"key": "ABC-123"},
-        reviewer={"username": "reviewer"},
-        requestor={"username": "requestor"},
-        review_type="primary",
+        reviewer=Person(username="reviewer"),
+        requestor=Person(username="requestor"),
+        review_type=ReviewType.PRIMARY,
         pull_requests=[pull_request(1), pull_request(2)],
     )
 
     class Agent:
         def cross_pr_validator(self, _: dict[str, object]) -> CrossPrValidationResult:
-            return CrossPrValidationResult(
-                findings=[
-                    {
-                        "target": {"project": "PRJ", "repository": "service", "id": 99},
-                        "finding": finding(),
-                    }
-                ]
+            return CrossPrValidationResult.model_validate(
+                {
+                    "findings": [
+                        {
+                            "target": {"project": "PRJ", "repository": "service", "id": 99},
+                            "finding": finding(),
+                        }
+                    ]
+                }
             )
 
     with pytest.raises(WorkflowError, match="unknown pull request"):

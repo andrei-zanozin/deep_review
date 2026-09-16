@@ -3,12 +3,15 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
+import sys
 import time
 import uuid
 from collections.abc import AsyncIterator
 from contextlib import ExitStack, asynccontextmanager
 from pathlib import Path
-from typing import Any, Protocol
+from types import TracebackType
+from typing import Any, Protocol, cast
 
 import httpx
 import openai
@@ -19,14 +22,16 @@ from strands.hooks import (
     AfterToolCallEvent,
     BeforeModelCallEvent,
     BeforeToolCallEvent,
+    HookCallback,
+    HookProvider,
     HookRegistry,
 )
 from strands.models.openai import OpenAIModel
-from strands.tools.mcp import MCPClient
+from strands.tools.mcp import MCPClient, ToolFilters
 
 from deep_review.configuration import DeepReviewConfig, McpConfig, McpServerConfig
 from deep_review.errors import WorkflowError
-from deep_review.logging_config import api_log_context
+from deep_review.logging_config import api_log_context, tool_log_context
 from deep_review.models import (
     AgentRole,
     ConsolidationResult,
@@ -92,20 +97,23 @@ class AgentRunner(Protocol):
 
 
 class McpFactory:
-    def __init__(self, config: McpConfig, config_dir: Path) -> None:
+    def __init__(self, config: McpConfig, config_dir: Path, *, verbose: bool = False) -> None:
         self.config = config
         self.config_dir = config_dir.resolve()
+        self.verbose = verbose
 
     def jira(self, allowed: set[str] | None = None) -> MCPClient:
-        return self._client(self.config.jira, allowed)
+        return self._client(self.config.jira, allowed, source="jira")
 
     def bitbucket(self, allowed: set[str] | None = None) -> MCPClient:
-        return self._client(self.config.bitbucket, allowed)
+        return self._client(self.config.bitbucket, allowed, source="bitbucket")
 
     def _client(
         self,
         config: McpServerConfig,
         allowed: set[str] | None,
+        *,
+        source: str,
     ) -> MCPClient:
         parameters = StdioServerParameters(
             command=config.command[0],
@@ -113,8 +121,46 @@ class McpFactory:
             env=dict(config.environment),
             cwd=self.config_dir,
         )
-        filters = {"allowed": sorted(allowed)} if allowed is not None else None
-        return MCPClient(lambda: stdio_client(parameters), tool_filters=filters)
+        filters: ToolFilters | None = (
+            cast(ToolFilters, {"allowed": sorted(allowed)}) if allowed is not None else None
+        )
+        return MCPClient(
+            lambda: _logged_stdio_client(parameters, source=source, verbose=self.verbose),
+            tool_filters=filters,
+        )
+
+
+@asynccontextmanager
+async def _logged_stdio_client(
+    parameters: StdioServerParameters, *, source: str, verbose: bool
+) -> AsyncIterator[Any]:
+    if not verbose:
+        with open(os.devnull, "w", encoding="utf-8") as sink:
+            async with stdio_client(parameters, errlog=sink) as streams:
+                yield streams
+        return
+
+    read_fd, write_fd = os.pipe()
+    with (
+        os.fdopen(read_fd, "r", encoding="utf-8", errors="replace") as reader,
+        os.fdopen(write_fd, "w", encoding="utf-8") as writer,
+    ):
+        forwarder = asyncio.create_task(asyncio.to_thread(_forward_mcp_stderr, reader, source))
+        try:
+            async with stdio_client(parameters, errlog=writer) as streams:
+                yield streams
+        finally:
+            writer.close()
+            await forwarder
+
+
+def _forward_mcp_stderr(reader: Any, source: str) -> None:
+    for line in reader:
+        if line.lstrip().startswith("HTTP Request:"):
+            LOGGER.debug("MCP %s: %s", source, line.rstrip("\r\n"), extra=tool_log_context())
+        else:
+            sys.stderr.write(line)
+            sys.stderr.flush()
 
 
 class McpCommands:
@@ -138,8 +184,13 @@ class McpCommands:
             self._stack.close()
             raise
 
-    def __exit__(self, *exc_info: object) -> None:
-        self._stack.__exit__(*exc_info)
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_value: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> None:
+        self._stack.__exit__(exc_type, exc_value, traceback)
 
     def jira(self, name: str, arguments: dict[str, Any]) -> Any:
         return self._call(self._jira, name, arguments, source="jira")
@@ -166,7 +217,7 @@ class McpCommands:
             "Tool call started: source=%s, tool=%s",
             source,
             name,
-            extra=api_log_context(),
+            extra=tool_log_context(),
         )
         try:
             result = client.call_tool_sync(str(uuid.uuid4()), name, arguments)
@@ -183,20 +234,20 @@ class McpCommands:
         return value
 
 
-class ApiCallLoggingHooks:
+class ApiCallLoggingHooks(HookProvider):
     def __init__(self, role: AgentRole, model_id: str) -> None:
         self._role = role
         self._model_id = model_id
         self._model_started_at: float | None = None
         self._tool_started_at: dict[str, float] = {}
 
-    def register_hooks(self, registry: HookRegistry) -> None:
+    def register_hooks(self, registry: HookRegistry, **kwargs: Any) -> None:
         registry.add_callback(BeforeModelCallEvent, self._before_model_call)
         registry.add_callback(AfterModelCallEvent, self._after_model_call)
         registry.add_callback(BeforeToolCallEvent, self._before_tool_call)
         registry.add_callback(AfterToolCallEvent, self._after_tool_call)
 
-    def _before_model_call(self, _: BeforeModelCallEvent) -> None:
+    def _before_model_call(self, event: BeforeModelCallEvent) -> None:
         self._model_started_at = time.monotonic()
         LOGGER.info(
             "LLM call started: agent=%s, model=%s",
@@ -226,7 +277,7 @@ class ApiCallLoggingHooks:
             "Tool call started: agent=%s, tool=%s",
             self._role.value,
             event.tool_use.get("name", "unknown"),
-            extra=api_log_context(),
+            extra=tool_log_context(),
         )
 
     def _after_tool_call(self, event: AfterToolCallEvent) -> None:
@@ -265,7 +316,7 @@ def _log_api_finished(
         details,
         "success" if success else "error",
         max(0.0, elapsed),
-        extra=api_log_context(),
+        extra=tool_log_context() if call_type == "Tool" else api_log_context(),
     )
 
 
@@ -308,7 +359,7 @@ class StrandsAgentRunner:
                 if result.structured_output is None:
                     raise WorkflowError(f"{role.value} agent returned no structured output")
                 _log_finished_step(role)
-                return result.structured_output
+                return cast(DiscoveryResult, result.structured_output)
 
         return asyncio.run(invoke())
 
@@ -341,7 +392,7 @@ class StrandsAgentRunner:
                 if result.structured_output is None:
                     raise WorkflowError(f"{role.value} agent returned no structured output")
                 _log_finished_step(role)
-                return result.structured_output
+                return cast(FixVerifierDecision, result.structured_output)
 
         return asyncio.run(invoke())
 
@@ -370,8 +421,9 @@ class StrandsAgentRunner:
                     raise WorkflowError(f"{role.value} agent failed: {exc}") from exc
                 if result.structured_output is None:
                     raise WorkflowError(f"{role.value} agent returned no structured output")
-                _log_finished_step(role, len(result.structured_output.findings))
-                return result.structured_output
+                output = cast(ReviewResult, result.structured_output)
+                _log_finished_step(role, len(output.findings))
+                return output
 
         return asyncio.run(invoke())
 
@@ -400,8 +452,9 @@ class StrandsAgentRunner:
                     raise WorkflowError(f"{role.value} agent failed: {exc}") from exc
                 if result.structured_output is None:
                     raise WorkflowError(f"{role.value} agent returned no structured output")
-                _log_finished_step(role, len(result.structured_output.findings))
-                return result.structured_output
+                output = cast(ReviewResult, result.structured_output)
+                _log_finished_step(role, len(output.findings))
+                return output
 
         return asyncio.run(invoke())
 
@@ -430,8 +483,9 @@ class StrandsAgentRunner:
                     raise WorkflowError(f"{role.value} agent failed: {exc}") from exc
                 if result.structured_output is None:
                     raise WorkflowError(f"{role.value} agent returned no structured output")
-                _log_finished_step(role, len(result.structured_output.findings))
-                return result.structured_output
+                output = cast(ReviewResult, result.structured_output)
+                _log_finished_step(role, len(output.findings))
+                return output
 
         return asyncio.run(invoke())
 
@@ -461,7 +515,7 @@ class StrandsAgentRunner:
                 if result.structured_output is None:
                     raise WorkflowError(f"{role.value} agent returned no structured output")
                 _log_finished_step(role)
-                return result.structured_output
+                return cast(ConsolidationResult, result.structured_output)
 
         return asyncio.run(invoke())
 
@@ -493,8 +547,9 @@ class StrandsAgentRunner:
                     raise WorkflowError(f"{role.value} agent failed: {exc}") from exc
                 if result.structured_output is None:
                     raise WorkflowError(f"{role.value} agent returned no structured output")
-                _log_finished_step(role, len(result.structured_output.findings))
-                return result.structured_output
+                output = cast(CrossPrValidationResult, result.structured_output)
+                _log_finished_step(role, len(output.findings))
+                return output
 
         return asyncio.run(invoke())
 
@@ -543,7 +598,7 @@ class StrandsAgentRunner:
             finally:
                 await http_client.aclose()
 
-    def _logging_hooks(self, role: AgentRole) -> list[object]:
+    def _logging_hooks(self, role: AgentRole) -> list[HookProvider | HookCallback[Any]]:
         llm = self.config.resolve(role).llm
         return [
             ApiCallLoggingHooks(role, llm.model_id),
