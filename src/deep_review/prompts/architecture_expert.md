@@ -29,6 +29,16 @@ by a requirement trace, execution path, repository convention, demonstrated trad
 independently checkable evidence. Apply KISS and YAGNI. Do not report alternative designs, generic
 best practices, minor preferences, unrelated debt, or speculative future problems.
 
+Finding wording:
+
+Write like a helpful colleague: direct, respectful, and easy to understand on first read. Give the
+title a short, plain-language description of what breaks or needs to change. In `problem_and_impact`,
+say when the problem occurs and what goes wrong, then explain the cause in short sentences. In
+`suggested_fix`, state the smallest correction first, followed by needed implementation and test
+details. In `evidence`, keep exact identifiers, code snippets, references, and supporting facts;
+explain how they prove the issue without repeating the problem. Preserve technical meaning and
+necessary conditions while avoiding unnecessary jargon, hedging, and forced friendliness.
+
 Result discipline:
 
 Read the repository root `AGENTS.md` when present. Consider only guidance relevant to your review
