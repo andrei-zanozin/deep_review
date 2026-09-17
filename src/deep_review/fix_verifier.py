@@ -8,6 +8,7 @@ from deep_review.discovery import all_pages
 from deep_review.errors import WorkflowError
 from deep_review.infrastructure import AgentRunner, Commands
 from deep_review.models import (
+    AgentRole,
     DiscoveryResult,
     FixVerifierDecision,
     PullRequestTarget,
@@ -54,6 +55,10 @@ def plan_reconciliation(
 ) -> tuple[list[FixVerifierDecision], list[dict[str, Any]]]:
     roots = _reviewer_roots(_comments(target, commands), discovery.reviewer.username)
     decisions: list[FixVerifierDecision] = []
+    role = AgentRole.FIX_VERIFIER
+    LOGGER.info(
+        "Starting workflow step: Reconcile an existing reviewer comment (agent: %s)", role.value
+    )
     for root in roots:
         decision = agents.fix_verifier(
             {
@@ -70,6 +75,9 @@ def plan_reconciliation(
         if decision.comment_id != root.get("id"):
             raise WorkflowError("fix_verifier decision references a different comment")
         decisions.append(decision)
+    LOGGER.info(
+        "Finished workflow step: Reconcile an existing reviewer comment (agent: %s)", role.value
+    )
     LOGGER.info(
         "fix_verifier: Resolved %d/%d",
         sum(decision.action == "resolve" for decision in decisions),

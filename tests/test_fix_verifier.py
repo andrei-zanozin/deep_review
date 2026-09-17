@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import Any, cast
 
@@ -47,6 +48,122 @@ class SecondaryCommands:
 class SecondaryAgent:
     def fix_verifier(self, _: dict[str, Any], __: Path) -> FixVerifierDecision:
         return FixVerifierDecision(comment_id=7, action="resolve", evidence="The defect is fixed.")
+
+
+class MultipleCommentsCommands(SecondaryCommands):
+    def __init__(self, comment_ids: tuple[int, ...]) -> None:
+        super().__init__()
+        self.comment_ids = comment_ids
+
+    def bitbucket(self, name: str, arguments: dict[str, Any]) -> Any:
+        self.calls.append((name, arguments))
+        if name == "get_pull_request_comments":
+            return {
+                "comments": [
+                    {
+                        "id": comment_id,
+                        "resolved": False,
+                        "author": {"slug": "reviewer"},
+                        "replies": [],
+                    }
+                    for comment_id in self.comment_ids
+                ],
+                "next_cursor": None,
+            }
+        raise AssertionError((name, arguments))
+
+
+class MultipleCommentsAgent:
+    def fix_verifier(self, context: dict[str, Any], _: Path) -> FixVerifierDecision:
+        return FixVerifierDecision(
+            comment_id=context["comment_thread"]["id"],
+            action="resolve",
+            evidence="The defect is fixed.",
+        )
+
+
+class FailingAgent:
+    def fix_verifier(self, _: dict[str, Any], __: Path) -> FixVerifierDecision:
+        raise WorkflowError("agent failed")
+
+
+@pytest.mark.parametrize("comment_ids", [(7, 8), ()])
+def test_fix_verifier_logs_one_step_for_all_comments(
+    comment_ids: tuple[int, ...], caplog: pytest.LogCaptureFixture
+) -> None:
+    commands = MultipleCommentsCommands(comment_ids)
+    target = PullRequestTarget(
+        id=3,
+        project="PRJ",
+        repository="repo",
+        source_branch="feature",
+        target_branch="main",
+        reviewed_head="a" * 40,
+        reviewed_base="b" * 40,
+    )
+    discovery = DiscoveryResult.model_validate(
+        {
+            "reviewer": {"username": "reviewer"},
+            "requestor": {"username": "requestor"},
+            "review_type": "fix_verifier",
+        }
+    )
+
+    with caplog.at_level(logging.INFO, logger="deep_review.fix_verifier"):
+        decisions, _ = plan_reconciliation(
+            {"key": "ABC-123"},
+            [],
+            "diff",
+            discovery,
+            target,
+            Path("."),
+            commands,
+            cast(AgentRunner, MultipleCommentsAgent()),
+        )
+
+    messages = [record.getMessage() for record in caplog.records]
+    step = "Reconcile an existing reviewer comment (agent: fix_verifier)"
+    assert [decision.comment_id for decision in decisions] == list(comment_ids)
+    assert messages.count(f"Starting workflow step: {step}") == 1
+    assert messages.count(f"Finished workflow step: {step}") == 1
+
+
+def test_fix_verifier_does_not_log_finished_step_after_an_agent_failure(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    with (
+        caplog.at_level(logging.INFO, logger="deep_review.fix_verifier"),
+        pytest.raises(WorkflowError, match="agent failed"),
+    ):
+        plan_reconciliation(
+            {"key": "ABC-123"},
+            [],
+            "diff",
+            DiscoveryResult.model_validate(
+                {
+                    "reviewer": {"username": "reviewer"},
+                    "requestor": {"username": "requestor"},
+                    "review_type": "fix_verifier",
+                }
+            ),
+            PullRequestTarget(
+                id=3,
+                project="PRJ",
+                repository="repo",
+                source_branch="feature",
+                target_branch="main",
+                reviewed_head="a" * 40,
+                reviewed_base="b" * 40,
+            ),
+            Path("."),
+            SecondaryCommands(),
+            cast(AgentRunner, FailingAgent()),
+        )
+
+    messages = [record.getMessage() for record in caplog.records]
+    step = "Reconcile an existing reviewer comment (agent: fix_verifier)"
+    assert messages.count(f"Starting workflow step: {step}") == 1
+    assert f"Finished workflow step: {step}" not in messages
 
 
 def test_fix_verifier_resolves_and_verifies_each_comment() -> None:

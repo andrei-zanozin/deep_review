@@ -378,11 +378,6 @@ class StrandsAgentRunner:
                     hooks=self._logging_hooks(role),
                 )
                 try:
-                    LOGGER.info(
-                        "Starting workflow step: %s (agent: %s)",
-                        AGENT_STEP_NAMES[role],
-                        role.value,
-                    )
                     result = await agent.invoke_async(
                         json.dumps(context, default=str, ensure_ascii=False),
                         structured_output_model=FixVerifierDecision,
@@ -391,7 +386,6 @@ class StrandsAgentRunner:
                     raise WorkflowError(f"{role.value} agent failed: {exc}") from exc
                 if result.structured_output is None:
                     raise WorkflowError(f"{role.value} agent returned no structured output")
-                _log_finished_step(role)
                 return cast(FixVerifierDecision, result.structured_output)
 
         return asyncio.run(invoke())
