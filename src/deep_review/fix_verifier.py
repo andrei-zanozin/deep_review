@@ -85,8 +85,8 @@ def apply_reconciliation(
     commands: Commands,
 ) -> FixVerifierStatus:
     for decision in decisions:
-        _apply_decision(target, decision, commands)
-        _verify_decision(target, decision, discovery, commands)
+        posted_reply_id = _apply_decision(target, decision, commands)
+        _verify_decision(target, decision, discovery, commands, posted_reply_id)
 
     remaining = _reviewer_roots(_comments(target, commands), discovery.reviewer.username)
     if not remaining:
@@ -124,14 +124,14 @@ def _reviewer_roots(comments: list[dict[str, Any]], reviewer: str) -> list[dict[
 
 def _apply_decision(
     target: PullRequestTarget, decision: FixVerifierDecision, commands: Commands
-) -> None:
+) -> int | None:
     if decision.action == "resolve":
         commands.bitbucket(
             "set_comment_resolved",
             {**target.mcp_arguments(), "comment_id": decision.comment_id, "resolved": True},
         )
     elif decision.action == "reply":
-        commands.bitbucket(
+        posted = commands.bitbucket(
             "add_pull_request_comment",
             {
                 **target.mcp_arguments(),
@@ -139,6 +139,13 @@ def _apply_decision(
                 "reply_to": decision.comment_id,
             },
         )
+        reply_id = posted.get("id") if isinstance(posted, dict) else None
+        if not isinstance(reply_id, int) or isinstance(reply_id, bool) or reply_id <= 0:
+            raise WorkflowError(
+                f"fix_verifier comment {decision.comment_id} (reply): posted reply has no valid ID"
+            )
+        return reply_id
+    return None
 
 
 def _verify_decision(
@@ -146,6 +153,7 @@ def _verify_decision(
     decision: FixVerifierDecision,
     discovery: DiscoveryResult,
     commands: Commands,
+    posted_reply_id: int | None,
 ) -> None:
     root = next(
         (
@@ -156,31 +164,58 @@ def _verify_decision(
         None,
     )
     if root is None:
-        raise WorkflowError("fix_verifier mutation verification could not find the root comment")
+        raise WorkflowError(
+            f"fix_verifier comment {decision.comment_id} ({decision.action}): "
+            "mutation verification could not find the root comment"
+        )
     if decision.action == "resolve" and not root.get("resolved"):
-        raise WorkflowError("fix_verifier resolve action was not verified")
-    if decision.action in {"reply", "no_action"} and not _has_current_reviewer_reply(
-        root, discovery
-    ):
-        raise WorkflowError("fix_verifier reviewer reply was not verified")
+        raise WorkflowError(
+            f"fix_verifier comment {decision.comment_id} (resolve): action was not verified"
+        )
+    if decision.action in {"reply", "no_action"}:
+        reply_id = posted_reply_id if decision.action == "reply" else None
+        if not _has_current_reviewer_reply(
+            root, discovery, reply_id=reply_id, action=decision.action
+        ):
+            raise WorkflowError(
+                f"fix_verifier comment {decision.comment_id} ({decision.action}): "
+                "reviewer reply was not verified"
+            )
 
 
-def _has_current_reviewer_reply(root: dict[str, Any], discovery: DiscoveryResult) -> bool:
+def _has_current_reviewer_reply(
+    root: dict[str, Any],
+    discovery: DiscoveryResult,
+    *,
+    reply_id: int | None = None,
+    action: str = "status",
+) -> bool:
     replies = list(_walk_replies(root.get("replies", [])))
-    requestor_times = [
-        reply.get("created_at", -1)
-        for reply in replies
-        if same_username(_author(reply), discovery.requestor.username)
-    ]
-    reviewer_times = [
-        reply.get("created_at", -1)
-        for reply in replies
-        if same_username(_author(reply), discovery.reviewer.username)
-    ]
-    if not requestor_times:
-        return False
-    latest_requestor = max(requestor_times)
-    return any(time > latest_requestor for time in reviewer_times)
+    other_times: list[int] = []
+    reviewer_times: list[int] = []
+    for reply in replies:
+        author = _author(reply)
+        created_at = reply.get("created_at")
+        if (
+            not isinstance(author, str)
+            or not author.strip()
+            or not isinstance(created_at, int)
+            or isinstance(created_at, bool)
+            or created_at < 0
+        ):
+            raise WorkflowError(
+                f"fix_verifier comment {root.get('id')} ({action}): "
+                "reply has an invalid author or creation time"
+            )
+        if same_username(author, discovery.reviewer.username):
+            if reply_id is None or reply.get("id") == reply_id:
+                reviewer_times.append(created_at)
+        else:
+            other_times.append(created_at)
+    if not other_times:
+        return reply_id is None or bool(reviewer_times)
+    latest_other = max(other_times)
+    return any(time > latest_other for time in reviewer_times)
 
 
 def _walk_replies(replies: list[Any]):

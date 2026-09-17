@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
@@ -161,6 +162,120 @@ def test_primary_no_issues_approves_and_finishes_jira(git_repository: Path) -> N
     jira_comment = next(args for server, name, args in commands.calls if name == "add_comment")
     assert jira_comment["body"] == "Hi [~requestor], review is done ✅"
     assert AgentRole.CONSOLIDATOR not in agents.roles
+
+
+class ProxyCommands(FakeCommands):
+    def __init__(self, head: str) -> None:
+        super().__init__(head)
+        self.threads = [
+            {
+                "id": comment_id,
+                "resolved": False,
+                "author": {"slug": "reviewer"},
+                "replies": (
+                    [
+                        {
+                            "id": comment_id + 10,
+                            "author": {"slug": "original-author"},
+                            "created_at": 10,
+                        }
+                    ]
+                    if comment_id in {3, 4}
+                    else []
+                ),
+            }
+            for comment_id in range(1, 5)
+        ]
+        self.threads[3]["replies"].append(
+            {"id": 24, "author": {"slug": "reviewer"}, "created_at": 11}
+        )
+
+    def jira(self, name: str, arguments: dict[str, Any]) -> Any:
+        if name == "get_issue_comments":
+            self.calls.append(("jira", name, arguments))
+            return {
+                "comments": [
+                    {"author": {"name": "original-author"}, "body": "Please review."},
+                    {"author": {"name": "proxy"}, "body": "Please review the fixes."},
+                ],
+                "next_cursor": None,
+            }
+        return super().jira(name, arguments)
+
+    def bitbucket(self, name: str, arguments: dict[str, Any]) -> Any:
+        if name == "get_pull_request_comments":
+            self.calls.append(("bitbucket", name, arguments))
+            return {"comments": deepcopy(self.threads), "next_cursor": None}
+        if name == "set_comment_resolved":
+            self.calls.append(("bitbucket", name, arguments))
+            self.threads[arguments["comment_id"] - 1]["resolved"] = True
+            return {"changed": True}
+        if name == "add_pull_request_comment":
+            self.calls.append(("bitbucket", name, arguments))
+            self.threads[arguments["reply_to"] - 1]["replies"].append(
+                {"id": 33, "author": {"slug": "reviewer"}, "created_at": 12}
+            )
+            return {"id": 33}
+        return super().bitbucket(name, arguments)
+
+
+class ProxyAgents(FakeAgents):
+    def discovery(self, context: dict[str, Any]) -> DiscoveryResult:
+        return DiscoveryResult.model_validate(
+            {
+                "reviewer": {"username": "reviewer"},
+                "requestor": {"username": "proxy"},
+                "review_type": "fix_verifier",
+            }
+        )
+
+    def fix_verifier(self, context: dict[str, Any], repository_root: Path) -> FixVerifierDecision:
+        comment_id = context["comment_thread"]["id"]
+        if comment_id in {1, 2}:
+            return FixVerifierDecision(comment_id=comment_id, action="resolve", evidence="Fixed.")
+        if comment_id == 3:
+            return FixVerifierDecision(
+                comment_id=comment_id, action="reply", reply="Still open.", evidence="Code"
+            )
+        return FixVerifierDecision(comment_id=comment_id, action="no_action", evidence="Answered.")
+
+
+def test_proxy_requestor_completes_fix_review_with_two_remaining_findings(
+    git_repository: Path,
+) -> None:
+    head = run_git(git_repository, "rev-parse", "HEAD")
+    commands = ProxyCommands(head)
+    result = execute_review("ABC-123", git_repository, commands, ProxyAgents(False))
+
+    assert result.status == "complete"
+    assert result.pull_requests[0].fix_verifier_status == "Done"
+    assert [thread["resolved"] for thread in commands.threads] == [True, True, False, False]
+    assert [args["status"] for _, name, args in commands.calls if name == "set_review_status"] == [
+        "NEEDS_WORK"
+    ]
+    assert [args["body"] for _, name, args in commands.calls if name == "add_comment"] == [
+        "Hi [~proxy], please check my findings in the PR(s) comments."
+    ]
+    assert [args["username"] for _, name, args in commands.calls if name == "assign_issue"] == [
+        "proxy"
+    ]
+
+
+def test_invalid_posted_reply_stops_review_status_update(git_repository: Path) -> None:
+    class InvalidReplyCommands(ProxyCommands):
+        def bitbucket(self, name: str, arguments: dict[str, Any]) -> Any:
+            result = super().bitbucket(name, arguments)
+            if name == "add_pull_request_comment":
+                del self.threads[arguments["reply_to"] - 1]["replies"][-1]["created_at"]
+            return result
+
+    head = run_git(git_repository, "rev-parse", "HEAD")
+    commands = InvalidReplyCommands(head)
+    result = execute_review("ABC-123", git_repository, commands, ProxyAgents(False))
+
+    assert result.status == "failed"
+    assert "comment 3 (reply): reply has an invalid author or creation time" in result.failures[0]
+    assert not any(name == "set_review_status" for _, name, _ in commands.calls)
 
 
 def test_findings_are_preflighted_before_mocked_publication(
