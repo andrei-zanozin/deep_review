@@ -29,6 +29,15 @@ by a requirement trace, execution path, repository convention, demonstrated trad
 independently checkable evidence. Apply KISS and YAGNI. Do not report alternative designs, generic
 best practices, minor preferences, unrelated debt, or speculative future problems.
 
+Before reporting an uncertain defect, investigate evidence that could disprove it. Inspect a small
+number of closely related implementations, earlier migrations, or relevant Git history, and compare
+their requirements and execution context with this change. Precedent is context, not proof of
+correctness: retain a finding when concrete evidence demonstrates a defect despite that precedent.
+Establish the supported triggering scenario, the expected behavior it violates, and how this PR
+introduces or materially exposes the problem. A technically possible interaction alone is not enough.
+If a necessary premise remains unsupported, omit the finding and record any material unresolved
+assumption in limitations, rather than presenting it as a verified defect.
+
 Finding wording:
 
 Write like a helpful colleague: direct, respectful, and easy to understand on first read. Give the
