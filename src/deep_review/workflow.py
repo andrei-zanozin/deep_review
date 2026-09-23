@@ -20,10 +20,12 @@ from deep_review.models import (
     CandidateFinding,
     DiscoveryResult,
     PrReviewContext,
+    PullRequestTarget,
     RepositoryIdentity,
     ReviewType,
     TicketReviewContext,
     _repository_identity_key,
+    same_username,
 )
 from deep_review.publication import finish_jira, publish, report_incomplete_jira
 from deep_review.repository import (
@@ -200,6 +202,12 @@ def _review_pull_request(
         return
 
     if context.review_type == ReviewType.FIX_VERIFIER:
+        # Fail on a changed PR before verifier agents spend time on the stale checkout.
+        skip_specialists = _should_skip_fix_verifier_specialists(
+            commands,
+            pull_request.target,
+            discovery.reviewer.username,
+        )
         decisions, existing_comments = plan_reconciliation(
             context.issue,
             context.jira_comments,
@@ -213,6 +221,20 @@ def _review_pull_request(
         pull_request.fix_verifier_decisions = decisions
         pull_request.existing_reviewer_comments = existing_comments
 
+        if skip_specialists:
+            LOGGER.info(
+                "Skipping specialist review for %s: reviewer already reviewed source commit %s; "
+                "comment reconciliation will continue",
+                _pull_request_label(pull_request),
+                pull_request.target.reviewed_head,
+            )
+            pull_request.status = "reviewed"
+            return
+        LOGGER.info(
+            "Running specialist review for %s: no confirmed prior review of the source commit",
+            _pull_request_label(pull_request),
+        )
+
     results, candidates = run_specialists(
         context.issue,
         context.jira_comments,
@@ -225,6 +247,52 @@ def _review_pull_request(
     pull_request.specialist_results = results
     pull_request.candidates = candidates
     pull_request.status = "reviewed"
+
+
+def _should_skip_fix_verifier_specialists(
+    commands: Commands,
+    target: PullRequestTarget,
+    reviewer: str,
+) -> bool:
+    current_pr = commands.bitbucket("get_pull_request", target.mcp_arguments())
+    if not isinstance(current_pr, dict):
+        raise WorkflowError("pull request metadata is not an object")
+    source = current_pr.get("source")
+    target_ref = current_pr.get("target")
+    if (
+        not isinstance(source, dict)
+        or source.get("commit") != target.reviewed_head
+        or not isinstance(target_ref, dict)
+        or target_ref.get("commit") != target.reviewed_base
+    ):
+        raise WorkflowError("pull-request head or base changed before fix verification")
+    return _reviewer_has_reviewed_current_commit(
+        current_pr,
+        reviewer,
+        target.reviewed_head,
+    )
+
+
+def _reviewer_has_reviewed_current_commit(
+    pull_request: dict[str, object], reviewer: str, source_commit: str
+) -> bool:
+    reviewers = pull_request.get("reviewers")
+    if not isinstance(reviewers, list):
+        return False
+    matches = []
+    for item in reviewers:
+        if not isinstance(item, dict):
+            continue
+        user = item.get("user")
+        slug = user.get("slug") if isinstance(user, dict) else None
+        if same_username(slug, reviewer):
+            matches.append(item)
+    if len(matches) != 1:
+        return False
+    reviewed_commit = matches[0].get("last_reviewed_commit")
+    return isinstance(reviewed_commit, str) and (
+        reviewed_commit.casefold() == source_commit.casefold()
+    )
 
 
 def _related_pull_request(context: PrReviewContext) -> dict[str, object]:

@@ -64,6 +64,11 @@ comments, then searches for matching open pull requests. It reviews matching loc
 including eligible sibling checkouts, and verifies the pull-request head and base again before
 publishing.
 
+For fix-verification reviews, fresh Bitbucket metadata lets the workflow skip the three specialist
+agents when the Jira reviewer has already reviewed the current source commit. Comment reconciliation
+still runs. Missing, ambiguous, malformed, or older reviewer commit metadata triggers the usual
+specialist review. This check covers source commits only; cross-PR validation continues as before.
+
 Add `--verbose` to show LLM and tool-call diagnostics, MCP server output, and HTTP request lines.
 Call diagnostics are hidden by default, regardless of their logging level; workflow progress, LLM
 usage summaries, and final failures remain visible. HTTP request lines appear at `DEBUG` in verbose

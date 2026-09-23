@@ -16,14 +16,18 @@ from deep_review.models import (
     FixVerifierDecision,
     JudgmentResult,
     ReviewResult,
+    ReviewType,
 )
-from deep_review.workflow import execute_review
+from deep_review.workflow import _reviewer_has_reviewed_current_commit, execute_review
 
 
 class FakeCommands:
     def __init__(self, head: str, base: str | None = None) -> None:
         self.head = head
         self.base = base or head
+        self.metadata_head = self.head
+        self.metadata_base = self.base
+        self.reviewers: list[dict[str, Any]] = []
         self.calls: list[tuple[str, str, dict[str, Any]]] = []
 
     def jira(self, name: str, arguments: dict[str, Any]) -> Any:
@@ -59,8 +63,9 @@ class FakeCommands:
         if name == "get_pull_request":
             return {
                 "id": 4,
-                "source": {"name": "main", "commit": self.head},
-                "target": {"name": "develop", "commit": self.base},
+                "reviewers": deepcopy(self.reviewers),
+                "source": {"name": "main", "commit": self.metadata_head},
+                "target": {"name": "develop", "commit": self.metadata_base},
             }
         if name in {"add_pull_request_comment", "set_review_status"}:
             return {}
@@ -155,6 +160,9 @@ class FakeAgents:
 def test_primary_no_issues_approves_and_finishes_jira(git_repository: Path) -> None:
     head = run_git(git_repository, "rev-parse", "HEAD")
     commands = FakeCommands(head)
+    commands.reviewers = [
+        {"user": {"slug": "REVIEWER"}, "last_reviewed_commit": head}
+    ]
     agents = FakeAgents(has_finding=False)
 
     execute_review("ABC-123", git_repository, commands, agents)
@@ -167,11 +175,47 @@ def test_primary_no_issues_approves_and_finishes_jira(git_repository: Path) -> N
     assert jira_comment["body"] == "Hi [~requestor], review is done ✅"
     assert AgentRole.CONSOLIDATOR not in agents.roles
     assert AgentRole.JUDGMENT not in agents.roles
+    assert {
+        AgentRole.ARCHITECTURE_EXPERT,
+        AgentRole.IMPLEMENTATION_EXPERT,
+        AgentRole.CODE_POLISH_EXPERT,
+    }.issubset(agents.roles)
+
+
+@pytest.mark.parametrize(
+    ("reviewers", "expected"),
+    [
+        ([{"user": {"slug": "REVIEWER"}, "last_reviewed_commit": "a" * 40}], True),
+        ([{"user": {"slug": "reviewer"}, "last_reviewed_commit": "b" * 40}], False),
+        ([{"user": {"slug": "reviewer"}}], False),
+        ([{"user": {"slug": "reviewer"}, "last_reviewed_commit": "bad"}], False),
+        ([], False),
+        (
+            [
+                {"user": {"slug": "reviewer"}, "last_reviewed_commit": "a" * 40},
+                {"user": {"slug": "REVIEWER"}, "last_reviewed_commit": "a" * 40},
+            ],
+            False,
+        ),
+        ([{"user": {"slug": "someone-else"}, "last_reviewed_commit": "a" * 40}], False),
+    ],
+)
+def test_fix_verifier_specialist_skip_requires_one_matching_reviewer_commit(
+    reviewers: list[dict[str, Any]], expected: bool
+) -> None:
+    reviewed_current_commit = _reviewer_has_reviewed_current_commit(
+        {"reviewers": reviewers}, "reviewer", "a" * 40
+    )
+
+    assert reviewed_current_commit is expected
 
 
 class ProxyCommands(FakeCommands):
     def __init__(self, head: str) -> None:
         super().__init__(head)
+        self.reviewers = [
+            {"user": {"slug": "reviewer"}, "last_reviewed_commit": head}
+        ]
         self.threads = [
             {
                 "id": comment_id,
@@ -250,10 +294,12 @@ def test_proxy_requestor_completes_fix_review_with_two_remaining_findings(
 ) -> None:
     head = run_git(git_repository, "rev-parse", "HEAD")
     commands = ProxyCommands(head)
-    result = execute_review("ABC-123", git_repository, commands, ProxyAgents(False))
+    agents = ProxyAgents(False)
+    result = execute_review("ABC-123", git_repository, commands, agents)
 
     assert result.status == "complete"
     assert result.pull_requests[0].fix_verifier_status == "Done"
+    assert len(result.pull_requests[0].fix_verifier_decisions) == 4
     assert [thread["resolved"] for thread in commands.threads] == [True, True, False, False]
     assert [args["status"] for _, name, args in commands.calls if name == "set_review_status"] == [
         "NEEDS_WORK"
@@ -264,6 +310,79 @@ def test_proxy_requestor_completes_fix_review_with_two_remaining_findings(
     assert [args["username"] for _, name, args in commands.calls if name == "assign_issue"] == [
         "proxy"
     ]
+    assert {
+        AgentRole.ARCHITECTURE_EXPERT,
+        AgentRole.IMPLEMENTATION_EXPERT,
+        AgentRole.CODE_POLISH_EXPERT,
+    }.isdisjoint(agents.roles)
+
+
+def test_fix_review_runs_specialists_when_reviewer_last_reviewed_an_older_commit(
+    git_repository: Path,
+) -> None:
+    head = run_git(git_repository, "rev-parse", "HEAD")
+    commands = ProxyCommands(head)
+    commands.reviewers[0]["last_reviewed_commit"] = "a" * 40
+    agents = ProxyAgents(False)
+
+    result = execute_review("ABC-123", git_repository, commands, agents)
+
+    assert result.status == "complete"
+    assert {
+        AgentRole.ARCHITECTURE_EXPERT,
+        AgentRole.IMPLEMENTATION_EXPERT,
+        AgentRole.CODE_POLISH_EXPERT,
+    }.issubset(agents.roles)
+
+
+def test_fix_review_fails_when_fresh_metadata_does_not_match_prepared_target(
+    git_repository: Path,
+) -> None:
+    head = run_git(git_repository, "rev-parse", "HEAD")
+    commands = ProxyCommands(head)
+    commands.metadata_head = "a" * 40
+    agents = ProxyAgents(False)
+
+    result = execute_review("ABC-123", git_repository, commands, agents)
+
+    assert result.status == "failed"
+    assert "head or base changed before fix verification" in result.failures[0]
+    assert not any(name == "set_review_status" for _, name, _ in commands.calls)
+    assert not any(name == "get_pull_request_comments" for _, name, _ in commands.calls)
+    assert {
+        AgentRole.ARCHITECTURE_EXPERT,
+        AgentRole.IMPLEMENTATION_EXPERT,
+        AgentRole.CODE_POLISH_EXPERT,
+    }.isdisjoint(agents.roles)
+
+
+def test_skipped_specialists_still_check_pr_freshness_before_reconciliation(
+    git_repository: Path,
+) -> None:
+    class ChangedBeforePublication(ProxyCommands):
+        def __init__(self, head: str) -> None:
+            super().__init__(head)
+            self.pr_reads = 0
+
+        def bitbucket(self, name: str, arguments: dict[str, Any]) -> Any:
+            if name == "get_pull_request":
+                self.pr_reads += 1
+                if self.pr_reads == 2:
+                    self.metadata_head = "a" * 40
+            return super().bitbucket(name, arguments)
+
+    head = run_git(git_repository, "rev-parse", "HEAD")
+    commands = ChangedBeforePublication(head)
+
+    result = execute_review("ABC-123", git_repository, commands, ProxyAgents(False))
+
+    assert result.status == "failed"
+    assert "head or base changed after review" in result.failures[0]
+    assert commands.pr_reads == 2
+    assert not any(
+        name in {"set_comment_resolved", "add_pull_request_comment", "set_review_status"}
+        for _, name, _ in commands.calls
+    )
 
 
 def test_invalid_posted_reply_stops_review_status_update(git_repository: Path) -> None:
@@ -561,6 +680,57 @@ def test_ticket_context_correlates_reviewed_and_evidence_only_prs(tmp_path: Path
     assert correlation[1]["specialist_results"] == {}
     statuses = [call for call in commands.calls if call[1] == "set_review_status"]
     assert len(statuses) == 1
+
+
+def test_cross_pr_validator_still_runs_when_fix_review_skips_specialists(tmp_path: Path) -> None:
+    first = tmp_path / "repo-a"
+    second = tmp_path / "repo-b"
+    heads = {
+        "repo-a": create_repository(first, "repo-a"),
+        "repo-b": create_repository(second, "repo-b"),
+    }
+
+    class FixReviewCommands(MultiRepoCommands):
+        def bitbucket(self, name: str, arguments: dict[str, Any]) -> Any:
+            if name == "get_pull_request_comments":
+                self.calls.append(("bitbucket", name, arguments))
+                return {"comments": [], "next_cursor": None}
+            if name == "get_pull_request":
+                self.calls.append(("bitbucket", name, arguments))
+                repository = str(arguments["repo"])
+                return {
+                    "reviewers": [
+                        {
+                            "user": {"slug": "reviewer"},
+                            "last_reviewed_commit": heads[repository],
+                        }
+                    ],
+                    "source": {"commit": heads[repository]},
+                    "target": {"commit": heads[repository]},
+                }
+            return super().bitbucket(name, arguments)
+
+    class FixReviewAgents(CapturingAgents):
+        def discovery(self, context: dict[str, Any]) -> DiscoveryResult:
+            result = super().discovery(context)
+            return result.model_copy(update={"review_type": ReviewType.FIX_VERIFIER})
+
+    commands = FixReviewCommands(heads, approved_repository="repo-b")
+    agents = FixReviewAgents()
+
+    result = execute_review("ABC-123", first, commands, agents)
+
+    assert result.status == "complete"
+    assert result.pull_requests[0].specialist_results == {}
+    assert {
+        AgentRole.ARCHITECTURE_EXPERT,
+        AgentRole.IMPLEMENTATION_EXPERT,
+        AgentRole.CODE_POLISH_EXPERT,
+    }.isdisjoint(agents.roles)
+    assert AgentRole.CROSS_PR_VALIDATOR in agents.payloads
+    correlation = agents.payloads[AgentRole.CROSS_PR_VALIDATOR][0]["pull_requests"]
+    assert correlation[0]["specialist_results"] == {}
+    assert len(correlation) == 2
 
 
 def test_missing_local_repository_publishes_valid_pr_and_reports_partial(
