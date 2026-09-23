@@ -14,6 +14,8 @@ from deep_review.models import (
     ConsolidationResult,
     CrossPrValidationResult,
     Finding,
+    JudgmentResult,
+    PrReviewContext,
     PullRequestTarget,
     ReviewResult,
     Severity,
@@ -107,9 +109,7 @@ def validate_cross_prs(
             ],
         }
     )
-    known = {
-        (item.key.project, item.key.repository, item.key.id): item for item in available
-    }
+    known = {(item.key.project, item.key.repository, item.key.id): item for item in available}
     for routed in result.findings:
         target_key = (routed.target.project, routed.target.repository, routed.target.id)
         if target_key not in known:
@@ -129,7 +129,7 @@ def consolidate(
     agents: AgentRunner,
 ) -> list[CandidateFinding]:
     if not candidates:
-        LOGGER.info("consolidator: accepted issues: 0, rejected issues: 0 []")
+        LOGGER.info("consolidator: kept 0/0 findings []")
         return []
     result = agents.consolidator(
         {
@@ -139,9 +139,9 @@ def consolidate(
     )
     consolidated = _validate_consolidation(candidates, result, bool(existing_comments))
     LOGGER.info(
-        "consolidator: accepted issues: %d, rejected issues: %d %s",
+        "consolidator: kept %d/%d findings %s",
         len(consolidated),
-        len(candidates) - len(consolidated),
+        len(candidates),
         _severity_summary(consolidated),
     )
     return consolidated
@@ -192,6 +192,96 @@ def _validate_consolidation(
     if used.intersection(excluded) or used | excluded != by_id.keys():
         raise WorkflowError("consolidation did not account for every candidate exactly once")
     return consolidated
+
+
+def judge_findings(
+    context: TicketReviewContext,
+    pull_request: PrReviewContext,
+    candidates: list[CandidateFinding],
+    repository_root: Path,
+    agents: AgentRunner,
+) -> tuple[list[CandidateFinding], JudgmentResult | None]:
+    if not candidates:
+        LOGGER.info("judgment: kept 0/0 findings (skipped)")
+        return [], None
+
+    related = [
+        {
+            "key": item.key.model_dump(mode="json"),
+            "target": item.target.model_dump(mode="json"),
+            "metadata": deepcopy(item.metadata),
+            "mode": item.mode,
+            "status": item.status,
+        }
+        for item in context.pull_requests
+        if item.key != pull_request.key
+    ]
+    cross_pr_evidence = []
+    if context.correlation is not None:
+        for routed in context.correlation.findings:
+            if routed.target != pull_request.key:
+                continue
+            for key in routed.related_pull_requests:
+                companion = next((item for item in context.pull_requests if item.key == key), None)
+                if companion is not None:
+                    cross_pr_evidence.append(
+                        {
+                            "key": key.model_dump(mode="json"),
+                            "diff": companion.diff,
+                            "specialist_results": {
+                                role.value: result.model_dump(mode="json")
+                                for role, result in companion.specialist_results.items()
+                            },
+                        }
+                    )
+
+    result = agents.judgment(
+        {
+            "issue": deepcopy(context.issue),
+            "jira_comments": deepcopy(context.jira_comments),
+            "reviewer": context.reviewer.model_dump(mode="json"),
+            "requestor": context.requestor.model_dump(mode="json"),
+            "review_type": context.review_type.value,
+            "pull_request": {
+                "target": pull_request.target.model_dump(mode="json"),
+                "metadata": deepcopy(pull_request.metadata),
+                "diff": pull_request.diff,
+                "repository_root": str(repository_root),
+            },
+            "candidates": [candidate.model_dump(mode="json") for candidate in candidates],
+            "specialist_results": {
+                role.value: output.model_dump(mode="json")
+                for role, output in pull_request.specialist_results.items()
+            },
+            "existing_reviewer_comments": deepcopy(pull_request.existing_reviewer_comments),
+            "fix_verifier_decisions": [
+                decision.model_dump(mode="json") for decision in pull_request.fix_verifier_decisions
+            ],
+            "related_pull_requests": related,
+            "cross_pr_validation": (
+                context.correlation.model_dump(mode="json")
+                if context.correlation is not None
+                else None
+            ),
+            "cross_pr_evidence": cross_pr_evidence,
+        },
+        repository_root,
+    )
+    ids = [candidate.id for candidate in candidates]
+    decided = [decision.candidate_id for decision in result.decisions]
+    if len(decided) != len(set(decided)) or set(decided) != set(ids):
+        raise WorkflowError("judgment did not account for every candidate exactly once")
+    decisions = {decision.candidate_id: decision for decision in result.decisions}
+    kept = [candidate for candidate in candidates if decisions[candidate.id].action == "keep"]
+    LOGGER.info(
+        "judgment: kept %d/%d findings %s",
+        len(kept),
+        len(candidates),
+        _severity_summary(kept),
+    )
+    for decision in result.decisions:
+        LOGGER.debug("judgment: %s %s: %s", decision.action, decision.candidate_id, decision.reason)
+    return kept, result
 
 
 def render_finding(finding: Finding, anchored: bool = False) -> str:

@@ -2,7 +2,8 @@
 
 `deep_review` is a Python workflow for evidence-based Bitbucket pull-request review. It retrieves
 the Jira issue, finds matching open pull requests, reviews their local diffs with specialist agents,
-consolidates verified findings, and publishes the result to Bitbucket and Jira.
+consolidates verified findings, judges which warrant a comment, and publishes the result to
+Bitbucket and Jira.
 
 ## Before you start
 

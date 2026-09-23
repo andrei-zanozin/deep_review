@@ -32,6 +32,7 @@ class AgentRole(StrEnum):
     IMPLEMENTATION_EXPERT = "implementation_expert"
     CODE_POLISH_EXPERT = "code_polish_expert"
     CONSOLIDATOR = "consolidator"
+    JUDGMENT = "judgment"
     CROSS_PR_VALIDATOR = "cross_pr_validator"
 
 
@@ -104,8 +105,10 @@ class Finding(StrictModel):
     @model_validator(mode="after")
     def validate_path(self) -> Finding:
         candidate = Path(self.path)
-        if candidate.is_absolute() or not candidate.parts or any(
-            part in {"", ".", ".."} for part in candidate.parts
+        if (
+            candidate.is_absolute()
+            or not candidate.parts
+            or any(part in {"", ".", ".."} for part in candidate.parts)
         ):
             raise ValueError("finding path must be normalized and repository-relative")
         return self
@@ -173,6 +176,17 @@ class ConsolidationResult(StrictModel):
     existing_comment_duplicates: list[str] = Field(default_factory=list)
 
 
+class JudgmentDecision(StrictModel):
+    candidate_id: str = Field(min_length=1)
+    action: Literal["keep", "discard"]
+    reason: str = Field(min_length=1)
+
+
+class JudgmentResult(StrictModel):
+    decisions: list[JudgmentDecision]
+    limitations: list[str] = Field(default_factory=list)
+
+
 class PrReviewContext(StrictModel):
     model_config = ConfigDict(validate_assignment=True)
 
@@ -182,14 +196,15 @@ class PrReviewContext(StrictModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
     diff: str | None = None
     mode: Literal["review", "evidence_only"] = "review"
-    status: Literal[
-        "discovered", "prepared", "reviewed", "published", "skipped", "failed"
-    ] = "discovered"
+    status: Literal["discovered", "prepared", "reviewed", "published", "skipped", "failed"] = (
+        "discovered"
+    )
     fix_verifier_decisions: list[FixVerifierDecision] = Field(default_factory=list)
     existing_reviewer_comments: list[dict[str, Any]] = Field(default_factory=list)
     fix_verifier_status: Literal["No issues found", "Done"] | None = None
     specialist_results: dict[AgentRole, ReviewResult] = Field(default_factory=dict)
     candidates: list[CandidateFinding] = Field(default_factory=list)
+    judgment_result: JudgmentResult | None = None
     findings: list[CandidateFinding] = Field(default_factory=list)
     issues_found: bool = False
     failure_reason: str | None = None
@@ -199,9 +214,7 @@ class PrReviewContext(StrictModel):
         if self.key != self.target.key:
             raise ValueError("pull-request context key does not match its target")
         if self.repository is not None and (
-            _repository_identity_key(
-                self.repository.project, self.repository.repository
-            )
+            _repository_identity_key(self.repository.project, self.repository.repository)
             != _repository_identity_key(self.key.project, self.key.repository)
         ):
             raise ValueError("pull-request context repository does not match its key")
@@ -224,10 +237,7 @@ class TicketReviewContext(StrictModel):
 
     @model_validator(mode="after")
     def validate_pull_request_keys(self) -> TicketReviewContext:
-        keys = [
-            (item.key.project, item.key.repository, item.key.id)
-            for item in self.pull_requests
-        ]
+        keys = [(item.key.project, item.key.repository, item.key.id) for item in self.pull_requests]
         if len(keys) != len(set(keys)):
             raise ValueError("ticket context contains duplicate pull-request keys")
         return self

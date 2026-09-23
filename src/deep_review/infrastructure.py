@@ -38,6 +38,7 @@ from deep_review.models import (
     CrossPrValidationResult,
     DiscoveryResult,
     FixVerifierDecision,
+    JudgmentResult,
     ReviewResult,
 )
 from deep_review.repository import repository_tools
@@ -54,6 +55,7 @@ AGENT_STEP_NAMES = {
     AgentRole.IMPLEMENTATION_EXPERT: "Review implementation-level correctness",
     AgentRole.CODE_POLISH_EXPERT: "Review code quality and maintainability",
     AgentRole.CONSOLIDATOR: "Consolidate review findings",
+    AgentRole.JUDGMENT: "Judge which findings warrant a comment",
     AgentRole.CROSS_PR_VALIDATOR: "Correlate findings across pull requests",
 }
 
@@ -92,6 +94,8 @@ class AgentRunner(Protocol):
     ) -> ReviewResult: ...
 
     def consolidator(self, context: dict[str, Any]) -> ConsolidationResult: ...
+
+    def judgment(self, context: dict[str, Any], repository_root: Path) -> JudgmentResult: ...
 
     def cross_pr_validator(self, context: dict[str, Any]) -> CrossPrValidationResult: ...
 
@@ -258,9 +262,7 @@ class ApiCallLoggingHooks(HookProvider):
 
     def _after_model_call(self, event: AfterModelCallEvent) -> None:
         started_at = (
-            self._model_started_at
-            if self._model_started_at is not None
-            else time.monotonic()
+            self._model_started_at if self._model_started_at is not None else time.monotonic()
         )
         self._model_started_at = None
         _log_api_finished(
@@ -510,6 +512,40 @@ class StrandsAgentRunner:
                     raise WorkflowError(f"{role.value} agent returned no structured output")
                 _log_finished_step(role)
                 return cast(ConsolidationResult, result.structured_output)
+
+        return asyncio.run(invoke())
+
+    def judgment(self, context: dict[str, Any], repository_root: Path) -> JudgmentResult:
+        async def invoke() -> JudgmentResult:
+            role = AgentRole.JUDGMENT
+            async with self._model(role) as model:
+                agent = Agent(
+                    model=model,
+                    system_prompt=self._prompt(role),
+                    tools=[
+                        self.servers.jira(JIRA_READ_TOOLS),
+                        self.servers.bitbucket(BITBUCKET_READ_TOOLS),
+                        *repository_tools(repository_root),
+                    ],
+                    callback_handler=None,
+                    hooks=self._logging_hooks(role),
+                )
+                try:
+                    LOGGER.info(
+                        "Starting workflow step: %s (agent: %s)",
+                        AGENT_STEP_NAMES[role],
+                        role.value,
+                    )
+                    result = await agent.invoke_async(
+                        json.dumps(context, default=str, ensure_ascii=False),
+                        structured_output_model=JudgmentResult,
+                    )
+                except Exception as exc:
+                    raise WorkflowError(f"{role.value} agent failed: {exc}") from exc
+                if result.structured_output is None:
+                    raise WorkflowError(f"{role.value} agent returned no structured output")
+                _log_finished_step(role)
+                return cast(JudgmentResult, result.structured_output)
 
         return asyncio.run(invoke())
 

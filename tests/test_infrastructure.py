@@ -30,6 +30,7 @@ from deep_review.models import (
     CrossPrValidationResult,
     DiscoveryResult,
     FixVerifierDecision,
+    JudgmentResult,
     ReviewResult,
 )
 from deep_review.usage import UsageTrackingHooks
@@ -96,6 +97,7 @@ class FakeAgent:
             ),
             ReviewResult: ReviewResult(status="no_issues", coverage=["reviewed"]),
             ConsolidationResult: ConsolidationResult(selections=[]),
+            JudgmentResult: JudgmentResult(decisions=[]),
             CrossPrValidationResult: CrossPrValidationResult(),
         }
         return FakeResult(outputs[structured_output_model])
@@ -227,9 +229,7 @@ def test_agent_invocations_own_distinct_direct_and_proxied_clients(
     proxied = next(
         client for client in FakeHttpClient.instances if client.kwargs["proxy"] is not None
     )
-    direct = next(
-        client for client in FakeHttpClient.instances if client.kwargs["proxy"] is None
-    )
+    direct = next(client for client in FakeHttpClient.instances if client.kwargs["proxy"] is None)
     assert str(proxied.kwargs["proxy"].url) == "http://proxy.example.test:8080/"
     assert proxied.kwargs["proxy"].auth == ("proxy-user", "proxy-password")
     assert direct.kwargs["proxy"] is None
@@ -264,9 +264,7 @@ def test_agent_invocations_own_distinct_direct_and_proxied_clients(
     }
 
 
-def test_agent_runners_expose_only_their_required_tools(
-    monkeypatch: Any, tmp_path: Path
-) -> None:
+def test_agent_runners_expose_only_their_required_tools(monkeypatch: Any, tmp_path: Path) -> None:
     FakeAgent.instances.clear()
     FakeHttpClient.instances.clear()
     FakeOpenAIClient.instances.clear()
@@ -287,6 +285,7 @@ def test_agent_runners_expose_only_their_required_tools(
     runner.implementation_expert({}, tmp_path)
     runner.code_polish_expert({}, tmp_path)
     runner.consolidator({})
+    runner.judgment({}, tmp_path)
     runner.cross_pr_validator({})
 
     assert [instance["system_prompt"] for instance in FakeAgent.instances] == [
@@ -299,6 +298,7 @@ def test_agent_runners_expose_only_their_required_tools(
         ["repository-tools"],
         ["repository-tools"],
         [],
+        ["jira-tools", "bitbucket-tools", "repository-tools"],
         ["jira-tools", "bitbucket-tools"],
     ]
     assert all(
@@ -311,6 +311,8 @@ def test_agent_runners_expose_only_their_required_tools(
         ("jira", infrastructure.JIRA_READ_TOOLS),
         ("jira", infrastructure.JIRA_READ_TOOLS),
         ("bitbucket", infrastructure.BITBUCKET_READ_TOOLS),
+        ("jira", infrastructure.JIRA_READ_TOOLS),
+        ("bitbucket", infrastructure.BITBUCKET_READ_TOOLS),
     ]
 
 
@@ -319,9 +321,7 @@ def test_every_agent_role_has_a_user_friendly_step_name() -> None:
 
 
 def test_mcp_result_parsing() -> None:
-    assert _tool_value(
-        {"status": "success", "structuredContent": {"answer": 42}}
-    ) == {"answer": 42}
+    assert _tool_value({"status": "success", "structuredContent": {"answer": 42}}) == {"answer": 42}
 
     class FailedClient:
         def call_tool_sync(self, *_: object) -> dict[str, object]:
@@ -357,8 +357,7 @@ def test_direct_mcp_calls_log_boundaries_without_payloads(
     )
     assert "do-not-log-this" not in "\n".join(messages)
     assert all(
-        getattr(record, LOG_CATEGORY_ATTRIBUTE) == TOOL_LOG_CATEGORY
-        for record in caplog.records
+        getattr(record, LOG_CATEGORY_ATTRIBUTE) == TOOL_LOG_CATEGORY for record in caplog.records
     )
 
 
@@ -489,9 +488,7 @@ def test_model_error_keeps_error_level_and_api_category(
     hooks = ApiCallLoggingHooks(AgentRole.ARCHITECTURE_EXPERT, "review-model")
 
     with caplog.at_level(logging.INFO, logger=infrastructure.__name__):
-        hooks._after_model_call(
-            cast(Any, SimpleNamespace(exception=RuntimeError("model failed")))
-        )
+        hooks._after_model_call(cast(Any, SimpleNamespace(exception=RuntimeError("model failed"))))
 
     assert len(caplog.records) == 1
     assert caplog.records[0].levelno == logging.ERROR

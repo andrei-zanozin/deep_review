@@ -14,6 +14,7 @@ from deep_review.models import (
     CrossPrValidationResult,
     DiscoveryResult,
     FixVerifierDecision,
+    JudgmentResult,
     ReviewResult,
 )
 from deep_review.workflow import execute_review
@@ -48,9 +49,7 @@ class FakeCommands:
                         "project": "PRJ",
                         "repository": "repository",
                         "state": "OPEN",
-                        "reviewers": [
-                            {"user": {"slug": "reviewer"}, "status": "UNAPPROVED"}
-                        ],
+                        "reviewers": [{"user": {"slug": "reviewer"}, "status": "UNAPPROVED"}],
                         "source": {"name": "main", "commit": self.head},
                         "target": {"name": "develop", "commit": self.base},
                     }
@@ -84,15 +83,11 @@ class FakeAgents:
             }
         )
 
-    def fix_verifier(
-        self, context: dict[str, Any], repository_root: Path
-    ) -> FixVerifierDecision:
+    def fix_verifier(self, context: dict[str, Any], repository_root: Path) -> FixVerifierDecision:
         self.roles.append(AgentRole.FIX_VERIFIER)
         return FixVerifierDecision(comment_id=1, action="resolve", evidence="Fixed.")
 
-    def architecture_expert(
-        self, context: dict[str, Any], repository_root: Path
-    ) -> ReviewResult:
+    def architecture_expert(self, context: dict[str, Any], repository_root: Path) -> ReviewResult:
         self.roles.append(AgentRole.ARCHITECTURE_EXPERT)
         if not self.has_finding:
             return ReviewResult(status="no_issues", coverage=["architecture_expert"])
@@ -115,15 +110,11 @@ class FakeAgents:
             }
         )
 
-    def implementation_expert(
-        self, context: dict[str, Any], repository_root: Path
-    ) -> ReviewResult:
+    def implementation_expert(self, context: dict[str, Any], repository_root: Path) -> ReviewResult:
         self.roles.append(AgentRole.IMPLEMENTATION_EXPERT)
         return ReviewResult(status="no_issues", coverage=["implementation_expert"])
 
-    def code_polish_expert(
-        self, context: dict[str, Any], repository_root: Path
-    ) -> ReviewResult:
+    def code_polish_expert(self, context: dict[str, Any], repository_root: Path) -> ReviewResult:
         self.roles.append(AgentRole.CODE_POLISH_EXPERT)
         return ReviewResult(status="no_issues", coverage=["code_polish_expert"])
 
@@ -141,6 +132,21 @@ class FakeAgents:
             }
         )
 
+    def judgment(self, context: dict[str, Any], repository_root: Path) -> JudgmentResult:
+        self.roles.append(AgentRole.JUDGMENT)
+        return JudgmentResult.model_validate(
+            {
+                "decisions": [
+                    {
+                        "candidate_id": candidate["id"],
+                        "action": "keep",
+                        "reason": "Material defect.",
+                    }
+                    for candidate in context["candidates"]
+                ]
+            }
+        )
+
     def cross_pr_validator(self, context: dict[str, Any]) -> CrossPrValidationResult:
         self.roles.append(AgentRole.CROSS_PR_VALIDATOR)
         return CrossPrValidationResult()
@@ -154,14 +160,13 @@ def test_primary_no_issues_approves_and_finishes_jira(git_repository: Path) -> N
     execute_review("ABC-123", git_repository, commands, agents)
 
     statuses = [
-        args["status"]
-        for server, name, args in commands.calls
-        if name == "set_review_status"
+        args["status"] for server, name, args in commands.calls if name == "set_review_status"
     ]
     assert statuses == ["APPROVED"]
     jira_comment = next(args for server, name, args in commands.calls if name == "add_comment")
     assert jira_comment["body"] == "Hi [~requestor], review is done ✅"
     assert AgentRole.CONSOLIDATOR not in agents.roles
+    assert AgentRole.JUDGMENT not in agents.roles
 
 
 class ProxyCommands(FakeCommands):
@@ -307,6 +312,70 @@ def test_findings_are_preflighted_before_mocked_publication(
     assert "please check my findings" in jira_comment["body"]
 
 
+def test_judgment_can_discard_a_real_finding_and_approve(
+    git_repository: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    base = run_git(git_repository, "rev-parse", "HEAD")
+    (git_repository / "code.txt").write_text("base\nbad\n", encoding="utf-8")
+    run_git(git_repository, "add", "code.txt")
+    run_git(git_repository, "commit", "-m", "reviewed")
+    commands = FakeCommands(run_git(git_repository, "rev-parse", "HEAD"), base)
+
+    class DiscardingAgents(FakeAgents):
+        def judgment(self, context: dict[str, Any], repository_root: Path) -> JudgmentResult:
+            assert run_git(repository_root, "rev-parse", "HEAD") == commands.head
+            assert context["specialist_results"]["architecture_expert"]["findings"]
+            return JudgmentResult.model_validate(
+                {
+                    "decisions": [
+                        {"candidate_id": item["id"], "action": "discard", "reason": "Low value."}
+                        for item in context["candidates"]
+                    ]
+                }
+            )
+
+    with caplog.at_level(logging.INFO, logger="deep_review.review"):
+        result = execute_review("ABC-123", git_repository, commands, DiscardingAgents(True))
+
+    assert result.status == "complete"
+    assert result.pull_requests[0].findings == []
+    assert result.pull_requests[0].judgment_result is not None
+    stage_logs = [
+        record.getMessage()
+        for record in caplog.records
+        if record.name == "deep_review.review"
+        and record.getMessage().startswith(("consolidator:", "judgment:"))
+    ]
+    assert stage_logs == [
+        "consolidator: kept 1/1 findings [Major: 1]",
+        "judgment: kept 0/1 findings []",
+    ]
+    assert not any("new consolidated findings" in record.getMessage() for record in caplog.records)
+    assert not any(name == "add_pull_request_comment" for _, name, _ in commands.calls)
+    assert [args["status"] for _, name, args in commands.calls if name == "set_review_status"] == [
+        "APPROVED"
+    ]
+
+
+def test_judgment_failure_prevents_pr_publication(git_repository: Path) -> None:
+    head = run_git(git_repository, "rev-parse", "HEAD")
+    commands = FakeCommands(head)
+
+    class FailingAgents(FakeAgents):
+        def judgment(self, context: dict[str, Any], repository_root: Path) -> JudgmentResult:
+            from deep_review.errors import WorkflowError
+
+            raise WorkflowError("judgment unavailable")
+
+    result = execute_review("ABC-123", git_repository, commands, FailingAgents(True))
+
+    assert result.status == "failed"
+    assert result.pull_requests[0].status == "failed"
+    assert not any(
+        name in {"add_pull_request_comment", "set_review_status"} for _, name, _ in commands.calls
+    )
+
+
 def test_execute_review_does_not_construct_runtime_dependencies(
     git_repository: Path,
 ) -> None:
@@ -331,9 +400,7 @@ def test_valid_unchanged_location_is_posted_as_general_comment(
         FakeAgents(has_finding=True, finding_line=1),
     )
 
-    comment = next(
-        args for _, name, args in commands.calls if name == "add_pull_request_comment"
-    )
+    comment = next(args for _, name, args in commands.calls if name == "add_pull_request_comment")
     assert "anchor" not in comment
     assert "Location: code.txt:1 (destination)" in comment["text"]
 
@@ -365,8 +432,7 @@ def test_target_commit_drift_stops_publication(git_repository: Path) -> None:
     assert result.status == "failed"
     assert "head or base changed" in result.failures[0]
     assert not any(
-        name in {"add_pull_request_comment", "set_review_status"}
-        for _, name, _ in commands.calls
+        name in {"add_pull_request_comment", "set_review_status"} for _, name, _ in commands.calls
     )
 
 
@@ -388,8 +454,7 @@ def test_invalid_local_location_stops_publication(git_repository: Path) -> None:
     assert result.status == "failed"
     assert "invalid locations: architecture_expert:1" in result.failures[0]
     assert not any(
-        name in {"add_pull_request_comment", "set_review_status"}
-        for _, name, _ in commands.calls
+        name in {"add_pull_request_comment", "set_review_status"} for _, name, _ in commands.calls
     )
 
 
@@ -538,10 +603,7 @@ def test_local_repository_matching_is_case_insensitive(
     assert result.status == "complete"
     assert result.pull_requests[0].repository is not None
     assert result.pull_requests[0].repository.root == repository
-    assert not [
-        record for record in caplog.records if record.name == "deep_review.repository"
-    ]
+    assert not [record for record in caplog.records if record.name == "deep_review.repository"]
     assert not any(
-        record.getMessage().startswith("local checkout lookup failed")
-        for record in caplog.records
+        record.getMessage().startswith("local checkout lookup failed") for record in caplog.records
     )

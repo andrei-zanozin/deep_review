@@ -31,7 +31,7 @@ from deep_review.repository import (
     prepare_checkout,
     pull_request_diff,
 )
-from deep_review.review import consolidate, run_specialists, validate_cross_prs
+from deep_review.review import consolidate, judge_findings, run_specialists, validate_cross_prs
 from deep_review.usage import UsageCollector
 
 LOGGER = logging.getLogger(__name__)
@@ -132,9 +132,7 @@ def _review_pull_requests(
 ) -> None:
     related = [_related_pull_request(item) for item in context.pull_requests]
     for pull_request in context.pull_requests:
-        identity = _repository_identity_key(
-            pull_request.key.project, pull_request.key.repository
-        )
+        identity = _repository_identity_key(pull_request.key.project, pull_request.key.repository)
         repository = repositories.get(identity)
         if repository is None:
             _skip_pull_request_without_repository(context, pull_request, repositories)
@@ -249,9 +247,7 @@ def _apply_cross_pr_validator(
             for item in context.pull_requests
         }
         for index, routed in enumerate(context.correlation.findings, start=1):
-            target = by_key[
-                (routed.target.project, routed.target.repository, routed.target.id)
-            ]
+            target = by_key[(routed.target.project, routed.target.repository, routed.target.id)]
             target.candidates.append(
                 CandidateFinding(id=f"cross_pr_validator:{index}", finding=routed.finding)
             )
@@ -279,9 +275,7 @@ def _publish_pull_requests_findings(
         except WorkflowError as exc:
             _fail_pull_request(context, pull_request, str(exc), "failed")
     return [
-        _pull_request_label(item)
-        for item in context.pull_requests
-        if item.status == "published"
+        _pull_request_label(item) for item in context.pull_requests if item.status == "published"
     ]
 
 
@@ -295,15 +289,19 @@ def _publish_pull_request_findings(
     if pull_request.repository is None:
         raise WorkflowError("reviewed pull request has no local repository")
 
-    pull_request.findings = consolidate(
+    consolidated = consolidate(
         pull_request.candidates,
         pull_request.existing_reviewer_comments,
         agents,
     )
-    LOGGER.info(
-        "new consolidated findings for PR %s: %d",
-        _pull_request_label(pull_request),
-        len(pull_request.findings),
+    if consolidated:
+        prepare_checkout(pull_request.repository.root, pull_request.target)
+    pull_request.findings, pull_request.judgment_result = judge_findings(
+        context,
+        pull_request,
+        consolidated,
+        pull_request.repository.root,
+        agents,
     )
     issues_found, fix_verifier_status = publish(
         pull_request.target,
