@@ -68,7 +68,7 @@ publishing.
 
 Before any review agents run, the workflow checks every available PR checkout, including PRs used
 only as evidence. A stale source branch or a changed PR head/base stops the whole ticket review. The
-workflow reports the incomplete review to Jira and exits with a non-zero status without changing PR
+workflow logs the final failure at error level and exits with a non-zero status without changing PR
 comments or review status.
 
 For fix-verification reviews, fresh Bitbucket metadata lets the workflow skip the three specialist
@@ -87,7 +87,7 @@ to `APPROVED` or `NEEDS_WORK`. On successful completion it also comments on the 
 assigns it to the requestor. Run it only with credentials authorized to make those changes.
 
 If a target cannot be safely prepared or changes during review, the workflow skips or fails that
-target and reports the incomplete review to Jira. The process exits with a non-zero status unless
+target and logs why the review could not be finalized. The process exits with a non-zero status unless
 the whole ticket review completes.
 
 ## Development

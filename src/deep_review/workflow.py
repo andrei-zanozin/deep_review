@@ -27,7 +27,7 @@ from deep_review.models import (
     _repository_identity_key,
     same_username,
 )
-from deep_review.publication import finish_jira, publish, report_incomplete_jira
+from deep_review.publication import finish_jira, publish
 from deep_review.repository import (
     discover_sibling_repositories,
     prepare_checkout,
@@ -108,11 +108,13 @@ def _finish_review(
 ) -> None:
     if context.failures:
         context.status = "partial" if published_pull_requests else "failed"
-        report_incomplete_jira(
+        LOGGER.error(
+            "Deep review could not be finalized for %s (status %s). "
+            "Reviewed PRs: %s. Skipped or failed: %s",
             context.issue_key,
-            published_pull_requests,
-            context.failures,
-            commands,
+            context.status,
+            ", ".join(published_pull_requests) if published_pull_requests else "none",
+            "; ".join(context.failures),
         )
     else:
         context.status = "complete"

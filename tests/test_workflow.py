@@ -685,7 +685,7 @@ def test_ticket_context_correlates_reviewed_and_evidence_only_prs(tmp_path: Path
 
 @pytest.mark.parametrize("review_type", ["primary", "fix_verifier"])
 def test_stale_target_stops_review_before_agents_or_pr_mutations(
-    git_repository: Path, review_type: str
+    git_repository: Path, review_type: str, caplog: pytest.LogCaptureFixture
 ) -> None:
     base = run_git(git_repository, "rev-parse", "HEAD")
     (git_repository / "code.txt").write_text("base\nfeature\n", encoding="utf-8")
@@ -727,9 +727,14 @@ def test_stale_target_stops_review_before_agents_or_pr_mutations(
         }
         for _, name, _ in commands.calls
     )
-    jira_comments = [args for _, name, args in commands.calls if name == "add_comment"]
-    assert len(jira_comments) == 1
-    assert "Deep review is incomplete" in jira_comments[0]["body"]
+    assert not any(name == "add_comment" for _, name, _ in commands.calls)
+    failures = [
+        record for record in caplog.records
+        if record.name == "deep_review.workflow" and record.levelno == logging.ERROR
+    ]
+    assert len(failures) == 1
+    assert "status failed" in failures[0].getMessage()
+    assert "rebase onto or merge develop" in failures[0].getMessage()
 
 
 def test_stale_evidence_only_pr_stops_all_review_agents(tmp_path: Path) -> None:
@@ -835,9 +840,16 @@ def test_missing_local_repository_publishes_valid_pr_and_reports_partial(
         "repo-a": "published",
         "missing": "skipped",
     }
-    jira_comments = [args for server, name, args in commands.calls if name == "add_comment"]
-    assert "Deep review is incomplete" in jira_comments[-1]["body"]
+    assert not any(name == "add_comment" for _, name, _ in commands.calls)
     assert not any(name == "assign_issue" for _, name, _ in commands.calls)
+    failures = [
+        record for record in caplog.records
+        if record.name == "deep_review.workflow" and record.levelno == logging.ERROR
+    ]
+    assert len(failures) == 1
+    assert "status partial" in failures[0].getMessage()
+    assert "Reviewed PRs: PRJ/repo-a#1" in failures[0].getMessage()
+    assert "PRJ/missing" in failures[0].getMessage()
     warning = next(
         record.getMessage()
         for record in caplog.records

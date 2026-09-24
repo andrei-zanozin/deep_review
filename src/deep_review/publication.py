@@ -82,27 +82,6 @@ def finish_jira(issue_key: str, requestor: str, issues_found: bool, commands: Co
     commands.jira("assign_issue", {"issue": issue_key, "username": requestor})
 
 
-def report_incomplete_jira(
-    issue_key: str,
-    reviewed: list[str],
-    failures: list[str],
-    commands: Commands,
-) -> None:
-    reviewed_text = ", ".join(reviewed) if reviewed else "none"
-    detail = "; ".join(failures)
-    commands.jira(
-        "add_comment",
-        {
-            "issue": issue_key,
-            "body": (
-                "Deep review is incomplete. "
-                f"Reviewed PRs: {reviewed_text}. "
-                f"Skipped or failed: {detail}"
-            ),
-        },
-    )
-
-
 def _preflight(
     target: PullRequestTarget,
     findings: list[CandidateFinding],
