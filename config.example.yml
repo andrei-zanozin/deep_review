@@ -1,5 +1,5 @@
 proxy:
-  server: "http://rb-proxy-de.bosch.com:8080"
+  server: "http://proxy.example.com:8080"
   username: "${PROXY_USERNAME}"
   password: "${PROXY_PASSWORD}"
 
