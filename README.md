@@ -14,6 +14,8 @@ You need:
   clones. The workflow also considers Git repositories directly beside it.
 - A clean working tree in each candidate clone. During review, the workflow fetches the PR source
   branch and may switch the checkout to that branch; it never proceeds with uncommitted changes.
+- Each PR source branch must contain the current commit of its target branch. Rebase the feature
+  branch onto its target or merge the target branch into it before reviewing.
 - Working Jira and Bitbucket MCP servers, and an OpenAI-compatible endpoint for the configured
   models.
 
@@ -63,6 +65,11 @@ Use the Jira issue key as the only positional argument. The workflow reads the i
 comments, then searches for matching open pull requests. It reviews matching local checkouts,
 including eligible sibling checkouts, and verifies the pull-request head and base again before
 publishing.
+
+Before any review agents run, the workflow checks every available PR checkout, including PRs used
+only as evidence. A stale source branch or a changed PR head/base stops the whole ticket review. The
+workflow reports the incomplete review to Jira and exits with a non-zero status without changing PR
+comments or review status.
 
 For fix-verification reviews, fresh Bitbucket metadata lets the workflow skip the three specialist
 agents when the Jira reviewer has already reviewed the current source commit. Comment reconciliation

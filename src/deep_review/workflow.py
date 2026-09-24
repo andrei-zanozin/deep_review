@@ -32,6 +32,7 @@ from deep_review.repository import (
     discover_sibling_repositories,
     prepare_checkout,
     pull_request_diff,
+    require_current_target,
 )
 from deep_review.review import consolidate, judge_findings, run_specialists, validate_cross_prs
 from deep_review.usage import UsageCollector
@@ -62,6 +63,9 @@ def execute_review(
     context, discovery = _initialize_review(issue_key, start, commands, agents)
     repositories = discover_sibling_repositories(start)
 
+    if not _preflight_pull_requests(context, repositories, commands):
+        _finish_review(context, [], commands)
+        return context
     _review_pull_requests(context, discovery, repositories, commands, agents)
     _apply_cross_pr_validator(context, agents)
     published_pull_requests = _publish_pull_requests_findings(
@@ -134,11 +138,11 @@ def _review_pull_requests(
 ) -> None:
     related = [_related_pull_request(item) for item in context.pull_requests]
     for pull_request in context.pull_requests:
-        identity = _repository_identity_key(pull_request.key.project, pull_request.key.repository)
-        repository = repositories.get(identity)
-        if repository is None:
-            _skip_pull_request_without_repository(context, pull_request, repositories)
+        if pull_request.status != "prepared":
             continue
+        repository = pull_request.repository
+        if repository is None:
+            raise WorkflowError("prepared pull request has no local repository")
         try:
             _review_pull_request(
                 context,
@@ -151,6 +155,42 @@ def _review_pull_requests(
             )
         except WorkflowError as exc:
             _fail_pull_request(context, pull_request, str(exc), "failed")
+
+
+def _preflight_pull_requests(
+    context: TicketReviewContext,
+    repositories: dict[tuple[str, str], RepositoryIdentity],
+    commands: Commands,
+) -> bool:
+    passed = True
+    for pull_request in context.pull_requests:
+        identity = _repository_identity_key(pull_request.key.project, pull_request.key.repository)
+        repository = repositories.get(identity)
+        if repository is None:
+            _skip_pull_request_without_repository(context, pull_request, repositories)
+            continue
+        try:
+            current = commands.bitbucket("get_pull_request", pull_request.target.mcp_arguments())
+            if (
+                not isinstance(current, dict)
+                or _commit(current, "source") != pull_request.target.reviewed_head
+                or _commit(current, "target") != pull_request.target.reviewed_base
+            ):
+                raise WorkflowError("pull-request head or base changed before review")
+            prepare_checkout(repository.root, pull_request.target)
+            require_current_target(repository.root, pull_request.target)
+            pull_request.repository = repository
+            pull_request.diff = pull_request_diff(repository.root, pull_request.target)
+            pull_request.status = "prepared"
+        except WorkflowError as exc:
+            _fail_pull_request(context, pull_request, str(exc), "failed")
+            passed = False
+    return passed
+
+
+def _commit(pull_request: dict[str, object], ref: str) -> str | None:
+    value = pull_request.get(ref)
+    return value.get("commit") if isinstance(value, dict) else None
 
 
 def _skip_pull_request_without_repository(
@@ -194,10 +234,7 @@ def _review_pull_request(
     agents: AgentRunner,
     related_pull_requests: list[dict[str, object]],
 ) -> None:
-    pull_request.repository = repository
     prepare_checkout(repository.root, pull_request.target)
-    pull_request.diff = pull_request_diff(repository.root, pull_request.target)
-    pull_request.status = "prepared"
     if pull_request.mode == "evidence_only":
         return
 

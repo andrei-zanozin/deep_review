@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import logging
+import subprocess
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from conftest import run_git
@@ -16,6 +18,7 @@ from deep_review.repository import (
     parse_bitbucket_remote,
     prepare_checkout,
     pull_request_diff,
+    require_current_target,
 )
 
 
@@ -110,6 +113,62 @@ def test_prepare_checkout_rejects_dirty_repository(git_repository: Path) -> None
     )
     with pytest.raises(WorkflowError, match="not clean"):
         prepare_checkout(git_repository, target)
+
+
+@pytest.mark.parametrize("integration", ["rebase", "merge"])
+def test_target_ancestry_accepts_rebased_or_merged_feature(
+    git_repository: Path, integration: str
+) -> None:
+    base = run_git(git_repository, "rev-parse", "HEAD")
+    run_git(git_repository, "switch", "-c", "develop")
+    (git_repository / "target.txt").write_text("new target commit\n", encoding="utf-8")
+    run_git(git_repository, "add", "target.txt")
+    run_git(git_repository, "commit", "-m", "target")
+    target_head = run_git(git_repository, "rev-parse", "HEAD")
+    run_git(git_repository, "switch", "main")
+    (git_repository / "feature.txt").write_text("feature change\n", encoding="utf-8")
+    run_git(git_repository, "add", "feature.txt")
+    run_git(git_repository, "commit", "-m", "feature")
+    if integration == "rebase":
+        run_git(git_repository, "rebase", "develop")
+    else:
+        run_git(git_repository, "merge", "--no-ff", "develop", "-m", "merge target")
+    feature_head = run_git(git_repository, "rev-parse", "HEAD")
+    assert feature_head != base
+
+    target = PullRequestTarget(
+        id=1,
+        project="PRJ",
+        repository="repository",
+        source_branch="main",
+        target_branch="develop",
+        reviewed_head=feature_head,
+        reviewed_base=target_head,
+    )
+    require_current_target(git_repository, target)
+
+
+def test_target_ancestry_reports_git_error(
+    git_repository: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    head = run_git(git_repository, "rev-parse", "HEAD")
+    target = PullRequestTarget(
+        id=1,
+        project="PRJ",
+        repository="repository",
+        source_branch="main",
+        target_branch="develop",
+        reviewed_head=head,
+        reviewed_base=head,
+    )
+
+    def broken_git(command, **kwargs):
+        assert command[:3] == ["git", "merge-base", "--is-ancestor"]
+        return SimpleNamespace(returncode=128, stderr="Git could not read commit", stdout="")
+
+    monkeypatch.setattr(subprocess, "run", broken_git)
+    with pytest.raises(WorkflowError, match="cannot verify target branch ancestry: Git could not"):
+        require_current_target(git_repository, target)
 
 
 def test_location_must_be_an_actual_changed_line(git_repository: Path) -> None:

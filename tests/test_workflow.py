@@ -335,18 +335,19 @@ def test_fix_review_runs_specialists_when_reviewer_last_reviewed_an_older_commit
     }.issubset(agents.roles)
 
 
+@pytest.mark.parametrize("changed_ref", ["metadata_head", "metadata_base"])
 def test_fix_review_fails_when_fresh_metadata_does_not_match_prepared_target(
-    git_repository: Path,
+    git_repository: Path, changed_ref: str,
 ) -> None:
     head = run_git(git_repository, "rev-parse", "HEAD")
     commands = ProxyCommands(head)
-    commands.metadata_head = "a" * 40
+    setattr(commands, changed_ref, "a" * 40)
     agents = ProxyAgents(False)
 
     result = execute_review("ABC-123", git_repository, commands, agents)
 
     assert result.status == "failed"
-    assert "head or base changed before fix verification" in result.failures[0]
+    assert "head or base changed before review" in result.failures[0]
     assert not any(name == "set_review_status" for _, name, _ in commands.calls)
     assert not any(name == "get_pull_request_comments" for _, name, _ in commands.calls)
     assert {
@@ -367,7 +368,7 @@ def test_skipped_specialists_still_check_pr_freshness_before_reconciliation(
         def bitbucket(self, name: str, arguments: dict[str, Any]) -> Any:
             if name == "get_pull_request":
                 self.pr_reads += 1
-                if self.pr_reads == 2:
+                if self.pr_reads == 3:
                     self.metadata_head = "a" * 40
             return super().bitbucket(name, arguments)
 
@@ -378,7 +379,7 @@ def test_skipped_specialists_still_check_pr_freshness_before_reconciliation(
 
     assert result.status == "failed"
     assert "head or base changed after review" in result.failures[0]
-    assert commands.pr_reads == 2
+    assert commands.pr_reads == 3
     assert not any(
         name in {"set_comment_resolved", "add_pull_request_comment", "set_review_status"}
         for _, name, _ in commands.calls
@@ -680,6 +681,92 @@ def test_ticket_context_correlates_reviewed_and_evidence_only_prs(tmp_path: Path
     assert correlation[1]["specialist_results"] == {}
     statuses = [call for call in commands.calls if call[1] == "set_review_status"]
     assert len(statuses) == 1
+
+
+@pytest.mark.parametrize("review_type", ["primary", "fix_verifier"])
+def test_stale_target_stops_review_before_agents_or_pr_mutations(
+    git_repository: Path, review_type: str
+) -> None:
+    base = run_git(git_repository, "rev-parse", "HEAD")
+    (git_repository / "code.txt").write_text("base\nfeature\n", encoding="utf-8")
+    run_git(git_repository, "add", "code.txt")
+    run_git(git_repository, "commit", "-m", "feature")
+    feature = run_git(git_repository, "rev-parse", "HEAD")
+    run_git(git_repository, "switch", "-c", "develop", base)
+    (git_repository / "validation.txt").write_text("new validation\n", encoding="utf-8")
+    (git_repository / "graphql.txt").write_text("new field\n", encoding="utf-8")
+    run_git(git_repository, "add", "validation.txt", "graphql.txt")
+    run_git(git_repository, "commit", "-m", "unrelated target additions")
+    target = run_git(git_repository, "rev-parse", "HEAD")
+    run_git(git_repository, "switch", "main")
+
+    if review_type == "fix_verifier":
+        commands = ProxyCommands(feature)
+        commands.base = target
+        commands.metadata_base = target
+    else:
+        commands = FakeCommands(feature, target)
+    agents = ProxyAgents(False) if review_type == "fix_verifier" else FakeAgents(False)
+    result = execute_review("ABC-123", git_repository, commands, agents)
+
+    assert result.status == "failed"
+    assert result.pull_requests[0].status == "failed"
+    assert "PRJ/repository#4" in result.failures[0]
+    assert f"main ({feature})" in result.failures[0]
+    assert f"develop ({target})" in result.failures[0]
+    assert "rebase onto or merge develop" in result.failures[0]
+    assert set(agents.roles).issubset({AgentRole.DISCOVERY})
+    assert not any(
+        name
+        in {
+            "get_pull_request_comments",
+            "add_pull_request_comment",
+            "set_comment_resolved",
+            "set_review_status",
+            "assign_issue",
+        }
+        for _, name, _ in commands.calls
+    )
+    jira_comments = [args for _, name, args in commands.calls if name == "add_comment"]
+    assert len(jira_comments) == 1
+    assert "Deep review is incomplete" in jira_comments[0]["body"]
+
+
+def test_stale_evidence_only_pr_stops_all_review_agents(tmp_path: Path) -> None:
+    first = tmp_path / "repo-a"
+    second = tmp_path / "repo-b"
+    first_head = create_repository(first, "repo-a")
+    second_head = create_repository(second, "repo-b")
+    run_git(second, "switch", "-c", "develop")
+    (second / "target.txt").write_text("later target change\n", encoding="utf-8")
+    run_git(second, "add", "target.txt")
+    run_git(second, "commit", "-m", "later target change")
+    second_base = run_git(second, "rev-parse", "HEAD")
+    run_git(second, "switch", "main")
+
+    class StaleEvidenceCommands(MultiRepoCommands):
+        def bitbucket(self, name: str, arguments: dict[str, Any]) -> Any:
+            result = super().bitbucket(name, arguments)
+            if name == "search_review_pull_requests":
+                result["items"][1]["target"]["commit"] = second_base
+            elif name == "get_pull_request" and arguments["repo"] == "repo-b":
+                result["target"]["commit"] = second_base
+            return result
+
+    commands = StaleEvidenceCommands(
+        {"repo-a": first_head, "repo-b": second_head}, approved_repository="repo-b"
+    )
+    agents = CapturingAgents()
+    result = execute_review("ABC-123", first, commands, agents)
+
+    assert result.status == "failed"
+    assert [item.status for item in result.pull_requests] == ["prepared", "failed"]
+    assert result.pull_requests[1].mode == "evidence_only"
+    assert agents.roles == [AgentRole.DISCOVERY]
+    assert not any(
+        name in {"add_pull_request_comment", "set_comment_resolved", "set_review_status"}
+        for _, name, _ in commands.calls
+    )
 
 
 def test_cross_pr_validator_still_runs_when_fix_review_skips_specialists(tmp_path: Path) -> None:

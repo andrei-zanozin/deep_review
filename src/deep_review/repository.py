@@ -165,6 +165,27 @@ def prepare_checkout(root: Path, target: PullRequestTarget) -> None:
         raise WorkflowError("local PR checkout verification failed: final verification failed")
 
 
+def require_current_target(root: Path, target: PullRequestTarget) -> None:
+    result = subprocess.run(
+        ["git", "merge-base", "--is-ancestor", target.reviewed_base, target.reviewed_head],
+        cwd=root,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    if result.returncode == 0:
+        return
+    if result.returncode == 1:
+        raise WorkflowError(
+            f"source branch {target.source_branch} ({target.reviewed_head}) does not contain "
+            f"target branch {target.target_branch} ({target.reviewed_base}); rebase onto or merge "
+            f"{target.target_branch} before rerunning the review"
+        )
+    detail = result.stderr.strip() or result.stdout.strip() or "unknown Git error"
+    raise WorkflowError(f"cannot verify target branch ancestry: {detail}")
+
+
 def pull_request_diff(root: Path, target: PullRequestTarget, unified: int = 3) -> str:
     if unified < 0:
         raise ValueError("diff context must not be negative")

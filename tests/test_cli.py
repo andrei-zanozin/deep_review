@@ -29,3 +29,18 @@ def test_cli_passes_verbose_to_logging_and_review(monkeypatch: Any, verbose: boo
 
     assert configured == [verbose]
     assert reviewed == [("ABC-123", verbose)]
+
+
+def test_cli_exits_nonzero_for_preflight_failure(monkeypatch: Any) -> None:
+    monkeypatch.setattr(sys, "argv", ["deep-review", "ABC-123"])
+    monkeypatch.setattr(cli, "configure_logging", lambda *, verbose: None)
+    monkeypatch.setattr(
+        cli,
+        "run_review",
+        lambda issue, *, verbose: SimpleNamespace(status="failed"),
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        cli.main()
+
+    assert exc.value.code == 1
