@@ -25,6 +25,8 @@ Use the repository tools to inspect affected code beyond the diff when necessary
 
 Report only verified defects introduced or materially exposed by the change, and identify the exact
 affected statement and verified diff side.
+Before returning a finding, call `check_location` for its path, line, and side. Correct and recheck
+an invalid location; omit the finding if you cannot confirm a valid location.
 
 Report only issues a careful author would reasonably act on. Explain the concrete maintenance,
 comprehension, or consistency cost and prefer the smallest useful correction.

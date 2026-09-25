@@ -213,11 +213,23 @@ def test_agent_invocations_own_distinct_direct_and_proxied_clients(
     for role in (AgentRole.ARCHITECTURE_EXPERT, AgentRole.IMPLEMENTATION_EXPERT):
         (tmp_path / f"{role.value}.md").write_text("prompt", encoding="utf-8")
     runner = StrandsAgentRunner(runtime_config(), FakeServers(), tmp_path)  # type: ignore[arg-type]
+    context = {
+        "pull_request": {
+            "id": 1,
+            "project": "PRJ",
+            "repository": "repo",
+            "source_branch": "feature",
+            "target_branch": "main",
+            "reviewed_head": "a" * 40,
+            "reviewed_base": "a" * 40,
+        },
+        "diff": "No changes.",
+    }
 
     with ThreadPoolExecutor(max_workers=2) as executor:
         results = list(
             executor.map(
-                lambda method: method({}, tmp_path),
+                lambda method: method(context, tmp_path),
                 (runner.architecture_expert, runner.implementation_expert),
             )
         )
@@ -278,28 +290,43 @@ def test_agent_runners_expose_only_their_required_tools(monkeypatch: Any, tmp_pa
     for role in AgentRole:
         (tmp_path / f"{role.value}.md").write_text(role.value, encoding="utf-8")
     runner = StrandsAgentRunner(runtime_config(), servers, tmp_path)  # type: ignore[arg-type]
+    context = {
+        "pull_request": {
+            "id": 1,
+            "project": "PRJ",
+            "repository": "repo",
+            "source_branch": "feature",
+            "target_branch": "main",
+            "reviewed_head": "a" * 40,
+            "reviewed_base": "a" * 40,
+        },
+        "diff": "No changes.",
+    }
 
     runner.discovery({})
     runner.fix_verifier({}, tmp_path)
-    runner.architecture_expert({}, tmp_path)
-    runner.implementation_expert({}, tmp_path)
-    runner.code_polish_expert({}, tmp_path)
+    runner.architecture_expert(context, tmp_path)
+    runner.implementation_expert(context, tmp_path)
+    runner.code_polish_expert(context, tmp_path)
     runner.consolidator({})
     runner.judgment({}, tmp_path)
-    runner.cross_pr_validator({})
+    runner.cross_pr_validator({"pull_requests": []})
 
     assert [instance["system_prompt"] for instance in FakeAgent.instances] == [
         role.value for role in AgentRole
     ]
-    assert [instance["tools"] for instance in FakeAgent.instances] == [
+    assert [
+        [item if isinstance(item, str) else item.tool_name for item in instance["tools"]]
+        for instance in FakeAgent.instances
+    ] == [
         [],
         ["jira-tools", "repository-tools"],
-        ["repository-tools"],
-        ["repository-tools"],
-        ["repository-tools"],
+        ["repository-tools", "check_location"],
+        ["repository-tools", "check_location"],
+        ["repository-tools", "check_location"],
         [],
         ["jira-tools", "bitbucket-tools", "repository-tools"],
-        ["jira-tools", "bitbucket-tools"],
+        ["jira-tools", "bitbucket-tools", "check_location"],
     ]
     assert all(
         len(instance["hooks"]) == 2
@@ -314,6 +341,45 @@ def test_agent_runners_expose_only_their_required_tools(monkeypatch: Any, tmp_pa
         ("jira", infrastructure.JIRA_READ_TOOLS),
         ("bitbucket", infrastructure.BITBUCKET_READ_TOOLS),
     ]
+
+
+def test_review_agents_receive_location_check_tools(monkeypatch: Any, tmp_path: Path) -> None:
+    FakeAgent.instances.clear()
+    monkeypatch.setattr(infrastructure.openai, "DefaultAsyncHttpxClient", FakeHttpClient)
+    monkeypatch.setattr(infrastructure.openai, "AsyncOpenAI", FakeOpenAIClient)
+    monkeypatch.setattr(infrastructure, "OpenAIModel", FakeModel)
+    monkeypatch.setattr(infrastructure, "Agent", FakeAgent)
+    for role in (
+        AgentRole.ARCHITECTURE_EXPERT,
+        AgentRole.IMPLEMENTATION_EXPERT,
+        AgentRole.CODE_POLISH_EXPERT,
+        AgentRole.CROSS_PR_VALIDATOR,
+    ):
+        (tmp_path / f"{role.value}.md").write_text(role.value, encoding="utf-8")
+    runner = StrandsAgentRunner(runtime_config(), FakeServers(), tmp_path)  # type: ignore[arg-type]
+    target = {
+        "id": 1,
+        "project": "PRJ",
+        "repository": "repo",
+        "source_branch": "feature",
+        "target_branch": "main",
+        "reviewed_head": "a" * 40,
+        "reviewed_base": "a" * 40,
+    }
+    specialist_context = {"pull_request": target, "diff": "No changes."}
+    runner.architecture_expert(specialist_context, tmp_path)
+    runner.implementation_expert(specialist_context, tmp_path)
+    runner.code_polish_expert(specialist_context, tmp_path)
+    runner.cross_pr_validator({"pull_requests": [{
+        "key": {"project": "PRJ", "repository": "repo", "id": 1},
+        "target": target,
+        "repository_root": str(tmp_path),
+        "diff": "No changes.",
+    }]})
+
+    assert len(FakeAgent.instances) == 4
+    for instance in FakeAgent.instances:
+        assert instance["tools"][-1].tool_name == "check_location"
 
 
 def test_every_agent_role_has_a_user_friendly_step_name() -> None:

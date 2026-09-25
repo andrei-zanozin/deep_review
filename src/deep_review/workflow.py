@@ -29,6 +29,7 @@ from deep_review.models import (
 )
 from deep_review.publication import finish_jira, publish
 from deep_review.repository import (
+    check_finding_location,
     discover_sibling_repositories,
     prepare_checkout,
     pull_request_diff,
@@ -283,6 +284,19 @@ def _review_pull_request(
         agents,
         related_pull_requests,
     )
+    candidates = [
+        candidate for candidate in candidates if _confirmed_location(pull_request, candidate)
+    ]
+    accepted_ids = {candidate.id for candidate in candidates}
+    for role, result in results.items():
+        findings = [
+            finding
+            for index, finding in enumerate(result.findings, start=1)
+            if f"{role.value}:{index}" in accepted_ids
+        ]
+        results[role] = result.model_copy(
+            update={"findings": findings, "status": "findings" if findings else "no_issues"}
+        )
     pull_request.specialist_results = results
     pull_request.candidates = candidates
     pull_request.status = "reviewed"
@@ -343,21 +357,58 @@ def _related_pull_request(context: PrReviewContext) -> dict[str, object]:
     }
 
 
+def _confirmed_location(
+    pull_request: PrReviewContext,
+    candidate: CandidateFinding,
+    *,
+    require_inline: bool = False,
+) -> bool:
+    if pull_request.repository is None:
+        raise WorkflowError("reviewed pull request has no local repository")
+    finding = candidate.finding
+    check = check_finding_location(
+        pull_request.repository.root,
+        pull_request.target,
+        pull_request.diff or "No changes.",
+        finding.path,
+        finding.line,
+        finding.side.value,
+    )
+    if check["valid"] and (not require_inline or check["inline"]):
+        return True
+    reason = "line is outside the target PR diff" if check["valid"] else check["reason"]
+    LOGGER.warning(
+        "omitted finding: PR=%s, candidate=%s, location=%s:%d (%s), reason=%s",
+        _pull_request_label(pull_request),
+        candidate.id,
+        finding.path,
+        finding.line,
+        finding.side.value,
+        reason,
+    )
+    return False
+
+
 def _apply_cross_pr_validator(
     context: TicketReviewContext,
     agents: AgentRunner,
 ) -> None:
     try:
-        context.correlation = validate_cross_prs(context, agents)
+        correlation = validate_cross_prs(context, agents)
         by_key = {
             (item.key.project, item.key.repository, item.key.id): item
             for item in context.pull_requests
         }
-        for index, routed in enumerate(context.correlation.findings, start=1):
+        accepted = []
+        for index, routed in enumerate(correlation.findings, start=1):
             target = by_key[(routed.target.project, routed.target.repository, routed.target.id)]
-            target.candidates.append(
-                CandidateFinding(id=f"cross_pr_validator:{index}", finding=routed.finding)
+            candidate = CandidateFinding(
+                id=f"cross_pr_validator:{index}", finding=routed.finding
             )
+            if _confirmed_location(target, candidate, require_inline=True):
+                target.candidates.append(candidate)
+                accepted.append(routed)
+        context.correlation = correlation.model_copy(update={"findings": accepted})
     except WorkflowError as exc:
         context.failures.append(f"ticket correlation failed: {exc}")
 

@@ -14,8 +14,7 @@ from deep_review.models import (
     PullRequestTarget,
 )
 from deep_review.repository import (
-    finding_location_exists,
-    location_in_diff,
+    check_finding_location,
     pull_request_diff,
 )
 from deep_review.review import render_finding
@@ -33,17 +32,17 @@ def publish(
     fix_verifier_decisions: list[FixVerifierDecision] | None = None,
     discovery: DiscoveryResult | None = None,
 ) -> tuple[bool, FixVerifierStatus | None]:
-    inline = _preflight(target, findings, repository_root, commands)
+    verified = _preflight(target, findings, repository_root, commands)
     if fix_verifier_decisions is not None:
         if discovery is None:
             raise WorkflowError("fix_verifier publication requires discovery context")
         fix_verifier_status = apply_reconciliation(
             target, fix_verifier_decisions, discovery, commands
         )
-    if findings:
+    if verified:
         if not diff:
             raise WorkflowError("pull-request diff is empty before publication")
-        for candidate, is_inline in zip(findings, inline, strict=True):
+        for candidate, is_inline in verified:
             finding = candidate.finding
             arguments: dict[str, Any] = {
                 **target.mcp_arguments(),
@@ -59,9 +58,9 @@ def publish(
                 "add_pull_request_comment",
                 arguments,
             )
-    LOGGER.info("posted issues: %d", len(findings))
+    LOGGER.info("posted issues: %d", len(verified))
 
-    needs_work = bool(findings) or fix_verifier_status == "Done"
+    needs_work = bool(verified) or fix_verifier_status == "Done"
     commands.bitbucket(
         "set_review_status",
         {
@@ -87,7 +86,7 @@ def _preflight(
     findings: list[CandidateFinding],
     repository_root: Path,
     commands: Commands,
-) -> list[bool]:
+) -> list[tuple[CandidateFinding, bool]]:
     current = commands.bitbucket("get_pull_request", target.mcp_arguments())
     if (
         not isinstance(current, dict)
@@ -95,19 +94,39 @@ def _preflight(
         or _commit(current, "target") != target.reviewed_base
     ):
         raise WorkflowError("pull-request head or base changed after review")
-    invalid = []
-    inline = []
+    verified = []
     changed_diff = pull_request_diff(repository_root, target, unified=0)
     for candidate in findings:
         finding = candidate.finding
-        exists = finding_location_exists(repository_root, target, finding)
-        is_inline = exists and location_in_diff(changed_diff, finding)
-        if not exists:
-            invalid.append(candidate.id)
-        inline.append(is_inline)
-    if invalid:
-        raise WorkflowError(f"findings have invalid locations: {', '.join(invalid)}")
-    return inline
+        check = check_finding_location(
+            repository_root,
+            target,
+            changed_diff,
+            finding.path,
+            finding.line,
+            finding.side.value,
+        )
+        if not check["valid"] or (
+            candidate.id.startswith("cross_pr_validator:") and not check["inline"]
+        ):
+            reason = (
+                "line is outside the target PR diff" if check["valid"] else check["reason"]
+            )
+            LOGGER.warning(
+                "omitted finding before publication: PR=%s/%s#%d, candidate=%s, "
+                "location=%s:%d (%s), reason=%s",
+                target.project,
+                target.repository,
+                target.id,
+                candidate.id,
+                finding.path,
+                finding.line,
+                finding.side.value,
+                reason,
+            )
+            continue
+        verified.append((candidate, bool(check["inline"])))
+    return verified
 
 
 def _commit(pull_request: dict[str, Any], ref: str) -> str | None:

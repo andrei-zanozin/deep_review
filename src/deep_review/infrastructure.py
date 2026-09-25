@@ -39,9 +39,10 @@ from deep_review.models import (
     DiscoveryResult,
     FixVerifierDecision,
     JudgmentResult,
+    PullRequestTarget,
     ReviewResult,
 )
-from deep_review.repository import repository_tools
+from deep_review.repository import cross_pr_location_tool, pr_location_tool, repository_tools
 from deep_review.usage import UsageCollector, UsageTrackingHooks
 
 LOGGER = logging.getLogger(__name__)
@@ -399,7 +400,14 @@ class StrandsAgentRunner:
                 agent = Agent(
                     model=model,
                     system_prompt=self._prompt(role),
-                    tools=repository_tools(repository_root),
+                    tools=[
+                        *repository_tools(repository_root),
+                        pr_location_tool(
+                            repository_root,
+                            PullRequestTarget.model_validate(context["pull_request"]),
+                            context["diff"],
+                        ),
+                    ],
                     callback_handler=None,
                     hooks=self._logging_hooks(role),
                 )
@@ -430,7 +438,14 @@ class StrandsAgentRunner:
                 agent = Agent(
                     model=model,
                     system_prompt=self._prompt(role),
-                    tools=repository_tools(repository_root),
+                    tools=[
+                        *repository_tools(repository_root),
+                        pr_location_tool(
+                            repository_root,
+                            PullRequestTarget.model_validate(context["pull_request"]),
+                            context["diff"],
+                        ),
+                    ],
                     callback_handler=None,
                     hooks=self._logging_hooks(role),
                 )
@@ -461,7 +476,14 @@ class StrandsAgentRunner:
                 agent = Agent(
                     model=model,
                     system_prompt=self._prompt(role),
-                    tools=repository_tools(repository_root),
+                    tools=[
+                        *repository_tools(repository_root),
+                        pr_location_tool(
+                            repository_root,
+                            PullRequestTarget.model_validate(context["pull_request"]),
+                            context["diff"],
+                        ),
+                    ],
                     callback_handler=None,
                     hooks=self._logging_hooks(role),
                 )
@@ -559,6 +581,7 @@ class StrandsAgentRunner:
                     tools=[
                         self.servers.jira(JIRA_READ_TOOLS),
                         self.servers.bitbucket(BITBUCKET_READ_TOOLS),
+                        cross_pr_location_tool(context["pull_requests"]),
                     ],
                     callback_handler=None,
                     hooks=self._logging_hooks(role),

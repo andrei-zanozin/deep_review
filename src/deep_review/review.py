@@ -97,6 +97,7 @@ def validate_cross_prs(
                 {
                     "key": item.key.model_dump(mode="json"),
                     "target": item.target.model_dump(mode="json"),
+                    "repository_root": str(item.repository.root) if item.repository else None,
                     "metadata": deepcopy(item.metadata),
                     "diff": item.diff,
                     "mode": item.mode,

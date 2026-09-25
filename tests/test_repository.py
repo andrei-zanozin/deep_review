@@ -11,6 +11,8 @@ from conftest import run_git
 from deep_review.errors import WorkflowError
 from deep_review.models import Finding, PullRequestTarget, Severity, Side
 from deep_review.repository import (
+    check_finding_location,
+    cross_pr_location_tool,
     discover_repository,
     discover_sibling_repositories,
     finding_location_exists,
@@ -346,3 +348,84 @@ def test_binary_finding_location_is_invalid(git_repository: Path) -> None:
     )
 
     assert not finding_location_exists(git_repository, target, finding)
+
+
+def test_check_finding_location_reports_side_and_anchor_status(git_repository: Path) -> None:
+    (git_repository / "code.txt").write_text("old\nkeep\n", encoding="utf-8")
+    (git_repository / "nested").mkdir()
+    (git_repository / "nested" / "file.txt").write_text("text\n", encoding="utf-8")
+    run_git(git_repository, "add", "code.txt", "nested/file.txt")
+    run_git(git_repository, "commit", "-m", "base lines")
+    base = run_git(git_repository, "rev-parse", "HEAD")
+    (git_repository / "code.txt").write_text("new\nkeep\n", encoding="utf-8")
+    (git_repository / "new.txt").write_text("added\n", encoding="utf-8")
+    (git_repository / "binary.dat").write_bytes(b"one\0two")
+    run_git(git_repository, "add", "code.txt", "new.txt", "binary.dat")
+    run_git(git_repository, "commit", "-m", "reviewed")
+    head = run_git(git_repository, "rev-parse", "HEAD")
+    target = PullRequestTarget(
+        id=1,
+        project="PRJ",
+        repository="repository",
+        source_branch="main",
+        target_branch="develop",
+        reviewed_head=head,
+        reviewed_base=base,
+    )
+    diff = pull_request_diff(git_repository, target, unified=0)
+
+    def check(path: str, line: int, side: str) -> dict[str, bool | str]:
+        return check_finding_location(git_repository, target, diff, path, line, side)
+
+    assert check("code.txt", 1, "destination") == {
+        "valid": True, "inline": True, "reason": "valid diff line"
+    }
+    assert check("code.txt", 1, "source")["inline"] is True
+    assert check("code.txt", 2, "destination") == {
+        "valid": True, "inline": False, "reason": "valid file line outside the PR diff"
+    }
+    assert check("new.txt", 1, "source")["reason"] == (
+        "file does not exist on the selected diff side"
+    )
+    assert check("missing.txt", 1, "destination")["valid"] is False
+    assert check("nested", 1, "destination")["reason"] == "path is not a file"
+    assert check("code.txt", 3, "destination")["reason"] == "line is outside the file"
+    assert check("binary.dat", 1, "destination")["reason"] == "file is binary"
+    assert check("code.txt", 1, "wrong")["reason"] == "invalid diff side"
+    assert check("nested//file.txt", 1, "destination")["reason"] == (
+        "path is not normalized and repository-relative"
+    )
+
+
+def test_cross_pr_location_tool_uses_the_selected_repository(tmp_path: Path) -> None:
+    entries = []
+    for pr_id, name in ((1, "one"), (2, "two")):
+        root = tmp_path / name
+        create_repository(root, "PRJ", name)
+        base = run_git(root, "rev-parse", "HEAD")
+        (root / f"{name}.txt").write_text(f"{name}\n", encoding="utf-8")
+        run_git(root, "add", f"{name}.txt")
+        run_git(root, "commit", "-m", "reviewed")
+        target = PullRequestTarget(
+            id=pr_id,
+            project="PRJ",
+            repository=name,
+            source_branch="main",
+            target_branch="develop",
+            reviewed_head=run_git(root, "rev-parse", "HEAD"),
+            reviewed_base=base,
+        )
+        entries.append({
+            "key": target.key.model_dump(mode="json"),
+            "target": target.model_dump(mode="json"),
+            "repository_root": str(root),
+            "diff": pull_request_diff(root, target),
+        })
+    check = cross_pr_location_tool(entries)
+
+    assert check("PRJ", "one", 1, "one.txt", 1, "destination")["inline"] is True
+    assert check("PRJ", "one", 1, "two.txt", 1, "destination")["valid"] is False
+    assert check("PRJ", "two", 2, "two.txt", 1, "destination")["inline"] is True
+    assert check("PRJ", "two", 1, "two.txt", 1, "destination")["reason"] == (
+        "unknown reviewed PR"
+    )

@@ -5,7 +5,7 @@ import re
 import subprocess
 from collections.abc import Sequence
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from strands import tool
 from unidiff import PatchSet
@@ -207,21 +207,75 @@ def pull_request_merge_base(root: Path, target: PullRequestTarget) -> str:
 
 
 def finding_location_exists(root: Path, target: PullRequestTarget, finding: Finding) -> bool:
+    return _location_error(root, target, finding.path, finding.line, finding.side) is None
+
+
+def check_finding_location(
+    root: Path,
+    target: PullRequestTarget,
+    diff: str,
+    path: str,
+    line: int,
+    side: str,
+) -> dict[str, bool | str]:
+    """Check a line against one reviewed PR and its effective diff."""
+    if side not in {Side.SOURCE, Side.DESTINATION}:
+        return {"valid": False, "inline": False, "reason": "invalid diff side"}
+    error = _location_error(root, target, path, line, Side(side))
+    if error:
+        return {"valid": False, "inline": False, "reason": error}
+    inline = _line_in_diff(diff, path, line, Side(side))
+    return {
+        "valid": True,
+        "inline": inline,
+        "reason": "valid diff line" if inline else "valid file line outside the PR diff",
+    }
+
+
+def _location_error(
+    root: Path, target: PullRequestTarget, path: str, line: int, side: Side
+) -> str | None:
+    if not path or path == ".":
+        return "path is not a repository-relative file"
+    try:
+        safe_path = _safe_relative(path)
+    except ValueError:
+        return "path is not normalized and repository-relative"
+    if safe_path != path:
+        return "path is not normalized and repository-relative"
+    if line < 1:
+        return "line must be positive"
     revision = (
         pull_request_merge_base(root, target)
-        if finding.side == Side.SOURCE
+        if side == Side.SOURCE
         else target.reviewed_head
     )
-    result = subprocess.run(
-        ["git", "show", f"{revision}:{_safe_relative(finding.path)}"],
+    file_spec = f"{revision}:{safe_path}"
+    kind = subprocess.run(
+        ["git", "cat-file", "-t", file_spec],
         cwd=root,
         check=False,
         capture_output=True,
         timeout=30,
     )
-    if result.returncode or b"\0" in result.stdout:
-        return False
-    return finding.line <= len(result.stdout.splitlines())
+    if kind.returncode:
+        return "file does not exist on the selected diff side"
+    if kind.stdout.strip() != b"blob":
+        return "path is not a file"
+    result = subprocess.run(
+        ["git", "show", file_spec],
+        cwd=root,
+        check=False,
+        capture_output=True,
+        timeout=30,
+    )
+    if result.returncode:
+        return "file does not exist on the selected diff side"
+    if b"\0" in result.stdout:
+        return "file is binary"
+    if line > len(result.stdout.splitlines()):
+        return "line is outside the file"
+    return None
 
 
 def _ensure_commit(root: Path, branch: str, commit: str) -> None:
@@ -255,24 +309,32 @@ def _ensure_commit(root: Path, branch: str, commit: str) -> None:
 
 
 def location_in_diff(diff: str, finding: Finding) -> bool:
+    return _line_in_diff(diff, finding.path, finding.line, finding.side)
+
+
+def _line_in_diff(diff: str, path: str, line: int, side: Side) -> bool:
     try:
         patch = PatchSet(diff.splitlines(keepends=True))
     except Exception as exc:
         raise WorkflowError(f"pull-request diff cannot be parsed: {exc}") from exc
 
     for changed_file in patch:
-        path = changed_file.source_file if finding.side == Side.SOURCE else changed_file.target_file
-        if _strip_prefix(path) != finding.path:
+        changed_path = changed_file.source_file if side == Side.SOURCE else changed_file.target_file
+        if _strip_prefix(changed_path) != path:
             continue
         for hunk in changed_file:
-            for line in hunk:
-                number = line.source_line_no if finding.side == Side.SOURCE else line.target_line_no
-                changed = (
-                    line.is_removed or line.is_context
-                    if finding.side == Side.SOURCE
-                    else line.is_added or line.is_context
+            for changed_line in hunk:
+                number = (
+                    changed_line.source_line_no
+                    if side == Side.SOURCE
+                    else changed_line.target_line_no
                 )
-                if number == finding.line and changed:
+                changed = (
+                    changed_line.is_removed or changed_line.is_context
+                    if side == Side.SOURCE
+                    else changed_line.is_added or changed_line.is_context
+                )
+                if number == line and changed:
                     return True
     return False
 
@@ -307,6 +369,44 @@ def repository_tools(root: Path) -> list[Any]:
         _git_log_tool(root),
         _git_blame_tool(root),
     ]
+
+
+def pr_location_tool(root: Path, target: PullRequestTarget, diff: str) -> Any:
+    @tool
+    def check_location(
+        path: str, line: int, side: Literal["source", "destination"]
+    ) -> dict[str, bool | str]:
+        """Check a file line on this reviewed PR; inline means a diff anchor exists."""
+        return check_finding_location(root, target, diff, path, line, side)
+
+    return check_location
+
+
+def cross_pr_location_tool(pull_requests: list[dict[str, Any]]) -> Any:
+    targets = {
+        (item["key"]["project"], item["key"]["repository"], item["key"]["id"]): item
+        for item in pull_requests
+    }
+
+    @tool
+    def check_location(
+        project: str,
+        repository: str,
+        pr_id: int,
+        path: str,
+        line: int,
+        side: Literal["source", "destination"],
+    ) -> dict[str, bool | str]:
+        """Check a line against the exact target PR; inline means a diff anchor exists."""
+        item = targets.get((project, repository, pr_id))
+        if item is None or item.get("repository_root") is None:
+            return {"valid": False, "inline": False, "reason": "unknown reviewed PR"}
+        target = PullRequestTarget.model_validate(item["target"])
+        return check_finding_location(
+            Path(item["repository_root"]), target, item["diff"], path, line, side
+        )
+
+    return check_location
 
 
 def _list_files_tool(root: Path) -> Any:

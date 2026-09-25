@@ -37,6 +37,8 @@ necessary.
 
 Report only verified defects introduced or materially exposed by the change, and identify the exact
 affected statement and verified diff side.
+Before returning a finding, call `check_location` for its path, line, and side. Correct and recheck
+an invalid location; omit the finding if you cannot confirm a valid location.
 
 Report requirement gaps, system-level correctness defects, materially inappropriate placement,
 architectural regressions, or interface failures only when they have a concrete consequence supported

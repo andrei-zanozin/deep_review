@@ -31,6 +31,8 @@ Use the repository tools to inspect affected code, relevant callers, callees, te
 
 Report only verified defects introduced or materially exposed by the change, and identify the exact
 affected statement and verified diff side.
+Before returning a finding, call `check_location` for its path, line, and side. Correct and recheck
+an invalid location; omit the finding if you cannot confirm a valid location.
 
 Report concrete implementation defects, unhandled edge cases, regressions, and test defects that can
 hide incorrect behavior. Do not infer correctness from test presence or a passing suite, report

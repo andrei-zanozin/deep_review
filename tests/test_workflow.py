@@ -10,14 +10,18 @@ from conftest import run_git
 
 from deep_review.models import (
     AgentRole,
+    CandidateFinding,
     ConsolidationResult,
     CrossPrValidationResult,
     DiscoveryResult,
+    Finding,
     FixVerifierDecision,
     JudgmentResult,
+    PullRequestTarget,
     ReviewResult,
     ReviewType,
 )
+from deep_review.publication import publish
 from deep_review.workflow import _reviewer_has_reviewed_current_commit, execute_review
 
 
@@ -478,8 +482,11 @@ def test_judgment_can_discard_a_real_finding_and_approve(
 
 
 def test_judgment_failure_prevents_pr_publication(git_repository: Path) -> None:
-    head = run_git(git_repository, "rev-parse", "HEAD")
-    commands = FakeCommands(head)
+    base = run_git(git_repository, "rev-parse", "HEAD")
+    (git_repository / "code.txt").write_text("base\nbad\n", encoding="utf-8")
+    run_git(git_repository, "add", "code.txt")
+    run_git(git_repository, "commit", "-m", "reviewed")
+    commands = FakeCommands(run_git(git_repository, "rev-parse", "HEAD"), base)
 
     class FailingAgents(FakeAgents):
         def judgment(self, context: dict[str, Any], repository_root: Path) -> JudgmentResult:
@@ -556,7 +563,9 @@ def test_target_commit_drift_stops_publication(git_repository: Path) -> None:
     )
 
 
-def test_invalid_local_location_stops_publication(git_repository: Path) -> None:
+def test_invalid_local_location_is_omitted_without_stopping_review(
+    git_repository: Path, caplog: pytest.LogCaptureFixture
+) -> None:
     base = run_git(git_repository, "rev-parse", "HEAD")
     (git_repository / "code.txt").write_text("base\nbad\n", encoding="utf-8")
     run_git(git_repository, "add", "code.txt")
@@ -564,18 +573,59 @@ def test_invalid_local_location_stops_publication(git_repository: Path) -> None:
     head = run_git(git_repository, "rev-parse", "HEAD")
     commands = FakeCommands(head, base)
 
-    result = execute_review(
-        "ABC-123",
-        git_repository,
-        commands,
-        FakeAgents(has_finding=True, finding_line=3),
+    with caplog.at_level(logging.WARNING, logger="deep_review.workflow"):
+        result = execute_review(
+            "ABC-123",
+            git_repository,
+            commands,
+            FakeAgents(has_finding=True, finding_line=3),
+        )
+
+    assert result.status == "complete"
+    assert result.failures == []
+    assert not any(name == "add_pull_request_comment" for _, name, _ in commands.calls)
+    assert next(args for _, name, args in commands.calls if name == "set_review_status") == {
+        "project": "PRJ", "repo": "repository", "pr_id": 4, "status": "APPROVED"
+    }
+    assert any(
+        "candidate=architecture_expert:1" in record.getMessage()
+        and "location=code.txt:3 (destination)" in record.getMessage()
+        and "reason=line is outside the file" in record.getMessage()
+        for record in caplog.records
     )
 
-    assert result.status == "failed"
-    assert "invalid locations: architecture_expert:1" in result.failures[0]
-    assert not any(
-        name in {"add_pull_request_comment", "set_review_status"} for _, name, _ in commands.calls
+
+def test_publication_final_check_omits_only_invalid_finding(git_repository: Path) -> None:
+    base = run_git(git_repository, "rev-parse", "HEAD")
+    (git_repository / "code.txt").write_text("base\nbad\n", encoding="utf-8")
+    run_git(git_repository, "add", "code.txt")
+    run_git(git_repository, "commit", "-m", "reviewed")
+    head = run_git(git_repository, "rev-parse", "HEAD")
+    target = PullRequestTarget(
+        id=4, project="PRJ", repository="repository", source_branch="main",
+        target_branch="develop", reviewed_head=head, reviewed_base=base,
     )
+    valid = CandidateFinding(
+        id="valid",
+        finding=Finding.model_validate({
+            "severity": "Major", "title": "Valid finding", "path": "code.txt",
+            "line": 2, "side": "destination", "problem_and_impact": "Incorrect value.",
+            "suggested_fix": "Use the expected value.", "evidence": "The new line is bad.",
+        }),
+    )
+    invalid = valid.model_copy(update={
+        "id": "invalid", "finding": valid.finding.model_copy(update={"line": 3})
+    })
+    commands = FakeCommands(head, base)
+
+    needs_work, _ = publish(
+        target, [valid, invalid], None, "reviewed diff", git_repository, commands
+    )
+
+    assert needs_work
+    comments = [args for _, name, args in commands.calls if name == "add_pull_request_comment"]
+    assert len(comments) == 1
+    assert comments[0]["anchor"] == {"path": "code.txt", "line": 2, "side": "destination"}
 
 
 class MultiRepoCommands(FakeCommands):
@@ -681,6 +731,98 @@ def test_ticket_context_correlates_reviewed_and_evidence_only_prs(tmp_path: Path
     assert correlation[1]["specialist_results"] == {}
     statuses = [call for call in commands.calls if call[1] == "set_review_status"]
     assert len(statuses) == 1
+
+
+def changed_repositories(
+    tmp_path: Path,
+) -> tuple[dict[str, Path], dict[str, str], dict[str, str]]:
+    roots = {name: tmp_path / name for name in ("repo-a", "repo-b")}
+    bases = {name: create_repository(root, name) for name, root in roots.items()}
+    heads = {}
+    for name, root in roots.items():
+        (root / "code.txt").write_text(f"{name}\nchanged\n", encoding="utf-8")
+        if name == "repo-b":
+            (root / "only-b.txt").write_text("only b\n", encoding="utf-8")
+        run_git(root, "add", ".")
+        run_git(root, "commit", "-m", "reviewed")
+        heads[name] = run_git(root, "rev-parse", "HEAD")
+    return roots, bases, heads
+
+
+def test_multi_pr_invalid_locations_are_omitted_and_valid_findings_publish(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    roots, bases, heads = changed_repositories(tmp_path)
+
+    class Commands(MultiRepoCommands):
+        def bitbucket(self, name: str, arguments: dict[str, Any]) -> Any:
+            result = super().bitbucket(name, arguments)
+            if name == "search_review_pull_requests":
+                for item in result["items"]:
+                    item["target"]["commit"] = bases[item["repository"]]
+            elif name == "get_pull_request":
+                result["target"]["commit"] = bases[str(arguments["repo"])]
+            return result
+
+    def finding(path: str, title: str) -> dict[str, Any]:
+        return {
+            "severity": "Major",
+            "title": title,
+            "path": path,
+            "line": 1 if path == "only-b.txt" else 2,
+            "side": "destination",
+            "problem_and_impact": "The behavior is wrong.",
+            "suggested_fix": "Correct the behavior.",
+            "evidence": "The reviewed code shows the defect.",
+        }
+
+    class Agents(CapturingAgents):
+        def architecture_expert(
+            self, context: dict[str, Any], repository_root: Path
+        ) -> ReviewResult:
+            name = context["pull_request"]["repository"]
+            findings = [finding("code.txt", f"Specialist {name}")]
+            if name == "repo-a":
+                findings.append(finding("only-b.txt", "Wrong repository"))
+            return ReviewResult.model_validate({
+                "status": "findings", "coverage": ["architecture"], "findings": findings
+            })
+
+        def cross_pr_validator(self, context: dict[str, Any]) -> CrossPrValidationResult:
+            self.payloads.setdefault(AgentRole.CROSS_PR_VALIDATOR, []).append(context)
+            keys = {item["key"]["repository"]: item["key"] for item in context["pull_requests"]}
+            return CrossPrValidationResult.model_validate({"findings": [
+                {"target": keys["repo-a"], "finding": finding("only-b.txt", "Misrouted")},
+                {"target": keys["repo-a"], "finding": finding("code.txt", "Cross A")},
+                {"target": keys["repo-b"], "finding": finding("code.txt", "Cross B")},
+            ]})
+
+        def consolidator(self, context: dict[str, Any]) -> ConsolidationResult:
+            return ConsolidationResult.model_validate({"selections": [
+                {"selected_id": item["id"], "severity": "Major"}
+                for item in context["candidates"]
+            ]})
+
+    commands = Commands(heads)
+    agents = Agents()
+    with caplog.at_level(logging.WARNING, logger="deep_review.workflow"):
+        result = execute_review("ABC-123", roots["repo-a"], commands, agents)
+
+    assert result.status == "complete"
+    assert result.failures == []
+    assert len(result.correlation.findings) == 2
+    comments = [args for _, name, args in commands.calls if name == "add_pull_request_comment"]
+    assert [item["repo"] for item in comments].count("repo-a") == 2
+    assert [item["repo"] for item in comments].count("repo-b") == 2
+    assert all(item["anchor"]["path"] == "code.txt" for item in comments)
+    warnings = [
+        record.getMessage()
+        for record in caplog.records
+        if "omitted finding" in record.getMessage()
+    ]
+    assert any("candidate=architecture_expert:2" in warning for warning in warnings)
+    assert any("candidate=cross_pr_validator:1" in warning for warning in warnings)
+    assert all("PR=PRJ/repo-a#1" in warning for warning in warnings)
 
 
 @pytest.mark.parametrize("review_type", ["primary", "fix_verifier"])
