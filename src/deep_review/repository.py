@@ -28,7 +28,7 @@ REMOTE_PATTERNS = (
 )
 
 
-def git(root: Path, *args: str, check: bool = True) -> str:
+def git(root: Path, *args: str, check: bool = True, strip_output: bool = True) -> str:
     result = subprocess.run(
         ["git", *args],
         cwd=root,
@@ -40,7 +40,7 @@ def git(root: Path, *args: str, check: bool = True) -> str:
     if check and result.returncode:
         detail = result.stderr.strip() or result.stdout.strip() or "unknown Git error"
         raise WorkflowError(detail)
-    return result.stdout.strip()
+    return result.stdout.strip() if strip_output else result.stdout
 
 
 def discover_repository(start: Path) -> RepositoryIdentity:
@@ -198,8 +198,9 @@ def pull_request_diff(root: Path, target: PullRequestTarget, unified: int = 3) -
         f"--unified={unified}",
         base,
         target.reviewed_head,
+        strip_output=False,
     )
-    return f"{diff}\n" if diff else "No changes."
+    return diff if diff else "No changes."
 
 
 def pull_request_merge_base(root: Path, target: PullRequestTarget) -> str:

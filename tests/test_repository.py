@@ -198,6 +198,33 @@ def test_location_must_be_an_actual_changed_line(git_repository: Path) -> None:
     assert not location_in_diff(diff, finding.model_copy(update={"line": 3}))
 
 
+def test_pull_request_diff_preserves_trailing_blank_context_line(git_repository: Path) -> None:
+    (git_repository / "code.txt").write_text("old\n\n", encoding="utf-8")
+    run_git(git_repository, "add", "code.txt")
+    run_git(git_repository, "commit", "-m", "base with blank line")
+    base = run_git(git_repository, "rev-parse", "HEAD")
+    (git_repository / "code.txt").write_text("new\n\n", encoding="utf-8")
+    run_git(git_repository, "add", "code.txt")
+    run_git(git_repository, "commit", "-m", "change before blank line")
+    target = PullRequestTarget(
+        id=1,
+        project="PRJ",
+        repository="repository",
+        source_branch="main",
+        target_branch="develop",
+        reviewed_head=run_git(git_repository, "rev-parse", "HEAD"),
+        reviewed_base=base,
+    )
+
+    diff = pull_request_diff(git_repository, target)
+    assert diff.endswith(" \n")
+    assert check_finding_location(git_repository, target, diff, "code.txt", 1, "destination") == {
+        "valid": True,
+        "inline": True,
+        "reason": "valid diff line",
+    }
+
+
 def test_local_location_validation_has_no_context_distance_limit(
     git_repository: Path,
 ) -> None:

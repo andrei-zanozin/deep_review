@@ -4,7 +4,7 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
 
 
 def _repository_identity_key(project: str, repository: str) -> tuple[str, str]:
@@ -194,7 +194,7 @@ class PrReviewContext(StrictModel):
     repository: RepositoryIdentity | None = None
     target: PullRequestTarget
     metadata: dict[str, Any] = Field(default_factory=dict)
-    diff: str | None = None
+    diff: Annotated[str, StringConstraints(strip_whitespace=False)] | None = None
     mode: Literal["review", "evidence_only"] = "review"
     status: Literal["discovered", "prepared", "reviewed", "published", "skipped", "failed"] = (
         "discovered"

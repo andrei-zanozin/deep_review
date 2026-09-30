@@ -22,6 +22,7 @@ from deep_review.models import (
     ReviewType,
 )
 from deep_review.publication import publish
+from deep_review.repository import check_finding_location
 from deep_review.workflow import _reviewer_has_reviewed_current_commit, execute_review
 
 
@@ -541,6 +542,35 @@ def test_workflow_does_not_request_bitbucket_raw_diff(git_repository: Path) -> N
 
     assert result.status == "complete"
     assert not any(name == "get_pull_request_diff" for _, name, _ in commands.calls)
+
+
+def test_workflow_preserves_trailing_blank_diff_context_for_location_checks(
+    git_repository: Path,
+) -> None:
+    (git_repository / "code.txt").write_text("old\n\n", encoding="utf-8")
+    run_git(git_repository, "add", "code.txt")
+    run_git(git_repository, "commit", "-m", "base with blank line")
+    base = run_git(git_repository, "rev-parse", "HEAD")
+    (git_repository / "code.txt").write_text("new\n\n", encoding="utf-8")
+    run_git(git_repository, "add", "code.txt")
+    run_git(git_repository, "commit", "-m", "change before blank line")
+    commands = FakeCommands(run_git(git_repository, "rev-parse", "HEAD"), base)
+
+    class CheckingAgents(FakeAgents):
+        def architecture_expert(
+            self, context: dict[str, Any], repository_root: Path
+        ) -> ReviewResult:
+            assert context["diff"].endswith(" \n")
+            target = PullRequestTarget.model_validate(context["pull_request"])
+            assert check_finding_location(
+                repository_root, target, context["diff"], "code.txt", 1, "destination"
+            )["inline"]
+            return super().architecture_expert(context, repository_root)
+
+    result = execute_review("ABC-123", git_repository, commands, CheckingAgents(False))
+
+    assert result.status == "complete"
+    assert result.pull_requests[0].diff.endswith(" \n")
 
 
 def test_target_commit_drift_stops_publication(git_repository: Path) -> None:
