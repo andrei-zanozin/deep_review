@@ -40,6 +40,11 @@ llm:
   #   cache_read_input_usd_per_million_tokens: "0.25"
   parameters:
     temperature: 0
+    # For GPT-6 Luna or Sol on Chat Completions, also set:
+    # reasoning_effort: none
+    # If a LiteLLM gateway rejects reasoning_effort as unsupported, also set:
+    # extra_body:
+    #   allowed_openai_params: [reasoning_effort]
 
 agents:
   discovery:

@@ -52,6 +52,27 @@ the root parameters. Set `api_key: null` only for an endpoint that does not requ
 Optional token pricing is expressed in USD per million tokens in the relevant `llm` block. A cost
 is shown only when pricing is available for all reported usage.
 
+The workflow uses Chat Completions, including function tools for structured agent output.
+For GPT-6 Luna and Sol, set `llm.parameters.reasoning_effort: none`; agents inherit this setting
+unless they override it. This disables reasoning so tool calling works on this endpoint.
+Reasoning with tools requires the Responses API, which this workflow does not currently use.
+See the [OpenAI model documentation](https://developers.openai.com/api/docs/models/gpt-6-luna).
+
+If a LiteLLM gateway rejects `reasoning_effort` with `UnsupportedParamsError`, use its
+[per-request parameter override](https://docs.litellm.ai/docs/completion/drop_params#specify-allowed-openai-params-in-a-request):
+
+```yaml
+llm:
+  # Keep your base_url, api_key, and model_id here.
+  parameters:
+    reasoning_effort: none
+    extra_body:
+      allowed_openai_params: [reasoning_effort]
+```
+
+`extra_body` adds the gateway option to the request JSON. Keep `reasoning_effort: none` so the
+model can use function tools through Chat Completions.
+
 ## Run a review
 
 Change to a clean checkout that can be reviewed, then run this project's command explicitly:
