@@ -17,6 +17,7 @@ import httpx
 import openai
 from mcp import StdioServerParameters, stdio_client
 from strands import Agent
+from strands.agent.conversation_manager import NullConversationManager
 from strands.hooks import (
     AfterModelCallEvent,
     AfterToolCallEvent,
@@ -26,6 +27,7 @@ from strands.hooks import (
     HookProvider,
     HookRegistry,
 )
+from strands.models.model import Model
 from strands.models.openai import OpenAIModel
 from strands.tools.mcp import MCPClient, ToolFilters
 
@@ -43,6 +45,7 @@ from deep_review.models import (
     ReviewResult,
 )
 from deep_review.repository import cross_pr_location_tool, pr_location_tool, repository_tools
+from deep_review.responses import ResponsesModel
 from deep_review.usage import UsageCollector, UsageTrackingHooks
 
 LOGGER = logging.getLogger(__name__)
@@ -342,6 +345,9 @@ class StrandsAgentRunner:
             async with self._model(role) as model:
                 agent = Agent(
                     model=model,
+                    conversation_manager=(
+                        NullConversationManager() if isinstance(model, ResponsesModel) else None
+                    ),
                     system_prompt=self._prompt(role),
                     tools=[],
                     callback_handler=None,
@@ -372,6 +378,9 @@ class StrandsAgentRunner:
             async with self._model(role) as model:
                 agent = Agent(
                     model=model,
+                    conversation_manager=(
+                        NullConversationManager() if isinstance(model, ResponsesModel) else None
+                    ),
                     system_prompt=self._prompt(role),
                     tools=[
                         self.servers.jira(JIRA_READ_TOOLS),
@@ -399,6 +408,9 @@ class StrandsAgentRunner:
             async with self._model(role) as model:
                 agent = Agent(
                     model=model,
+                    conversation_manager=(
+                        NullConversationManager() if isinstance(model, ResponsesModel) else None
+                    ),
                     system_prompt=self._prompt(role),
                     tools=[
                         *repository_tools(repository_root),
@@ -437,6 +449,9 @@ class StrandsAgentRunner:
             async with self._model(role) as model:
                 agent = Agent(
                     model=model,
+                    conversation_manager=(
+                        NullConversationManager() if isinstance(model, ResponsesModel) else None
+                    ),
                     system_prompt=self._prompt(role),
                     tools=[
                         *repository_tools(repository_root),
@@ -475,6 +490,9 @@ class StrandsAgentRunner:
             async with self._model(role) as model:
                 agent = Agent(
                     model=model,
+                    conversation_manager=(
+                        NullConversationManager() if isinstance(model, ResponsesModel) else None
+                    ),
                     system_prompt=self._prompt(role),
                     tools=[
                         *repository_tools(repository_root),
@@ -513,6 +531,9 @@ class StrandsAgentRunner:
             async with self._model(role) as model:
                 agent = Agent(
                     model=model,
+                    conversation_manager=(
+                        NullConversationManager() if isinstance(model, ResponsesModel) else None
+                    ),
                     system_prompt=self._prompt(role),
                     tools=[],
                     callback_handler=None,
@@ -543,6 +564,9 @@ class StrandsAgentRunner:
             async with self._model(role) as model:
                 agent = Agent(
                     model=model,
+                    conversation_manager=(
+                        NullConversationManager() if isinstance(model, ResponsesModel) else None
+                    ),
                     system_prompt=self._prompt(role),
                     tools=[
                         self.servers.jira(JIRA_READ_TOOLS),
@@ -577,6 +601,9 @@ class StrandsAgentRunner:
             async with self._model(role) as model:
                 agent = Agent(
                     model=model,
+                    conversation_manager=(
+                        NullConversationManager() if isinstance(model, ResponsesModel) else None
+                    ),
                     system_prompt=self._prompt(role),
                     tools=[
                         self.servers.jira(JIRA_READ_TOOLS),
@@ -607,7 +634,7 @@ class StrandsAgentRunner:
         return asyncio.run(invoke())
 
     @asynccontextmanager
-    async def _model(self, role: AgentRole) -> AsyncIterator[OpenAIModel]:
+    async def _model(self, role: AgentRole) -> AsyncIterator[Model]:
         spec = self.config.resolve(role)
         proxy = None
         if spec.use_proxy:
@@ -638,14 +665,18 @@ class StrandsAgentRunner:
         except Exception:
             await http_client.aclose()
             raise
+        model: Model | None = None
         try:
-            model = OpenAIModel(
+            provider = ResponsesModel if llm.api == "responses" else OpenAIModel
+            model = provider(
                 client=openai_client,
                 model_id=llm.model_id,
                 params=dict(llm.parameters),
             )
             yield model
         finally:
+            if isinstance(model, ResponsesModel):
+                model.clear_history()
             try:
                 await openai_client.close()
             finally:

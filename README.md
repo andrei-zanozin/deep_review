@@ -52,26 +52,42 @@ the root parameters. Set `api_key: null` only for an endpoint that does not requ
 Optional token pricing is expressed in USD per million tokens in the relevant `llm` block. A cost
 is shown only when pricing is available for all reported usage.
 
-The workflow uses Chat Completions, including function tools for structured agent output.
-For GPT-6 Luna and Sol, set `llm.parameters.reasoning_effort: none`; agents inherit this setting
-unless they override it. This disables reasoning so tool calling works on this endpoint.
-Reasoning with tools requires the Responses API, which this workflow does not currently use.
-See the [OpenAI model documentation](https://developers.openai.com/api/docs/models/gpt-6-luna).
+Select the API with `llm.api`: `chat_completions` (the default) or `responses`. Agents inherit
+it unless they set `agents.<role>.llm.api`. When an agent switches APIs, root parameters are not
+inherited; its parameters start from the selected API's defaults. Chat Completions defaults to
+`temperature: 0`; Responses adds no implicit parameters. Nested parameter values are replaced
+as a whole when overridden.
 
-If a LiteLLM gateway rejects `reasoning_effort` with `UnsupportedParamsError`, use its
-[per-request parameter override](https://docs.litellm.ai/docs/completion/drop_params#specify-allowed-openai-params-in-a-request):
+For reasoning with function tools on GPT-6 Luna/Sol, use Responses:
 
 ```yaml
 llm:
   # Keep your base_url, api_key, and model_id here.
+  api: responses
   parameters:
-    reasoning_effort: none
-    extra_body:
-      allowed_openai_params: [reasoning_effort]
+    reasoning:
+      effort: medium
+
+agents:
+  architecture_expert:
+    llm:
+      parameters:
+        reasoning:
+          effort: high
 ```
 
-`extra_body` adds the gateway option to the request JSON. Keep `reasoning_effort: none` so the
-model can use function tools through Chat Completions.
+The endpoint must support `/responses` for the configured model. Use Responses parameter names,
+such as `reasoning.effort` and `max_output_tokens`; supported effort values depend on the model.
+Omitting effort uses the model's default. `none` disables reasoning on models that support it.
+Do not carry over Chat Completions' `reasoning_effort`, `max_tokens`, or the LiteLLM allow-list
+workaround. See the [OpenAI model documentation](https://developers.openai.com/api/docs/models/gpt-6-luna).
+
+Responses preserves complete output items, including encrypted reasoning, across tool calls within
+one agent run. History stays in memory, is cleared when the run ends, and is excluded from shared
+structured results. Each new run, including a rerun after failure, starts with fresh history.
+The adapter controls history and storage fields: `store: false`, no `previous_response_id` or
+`conversation`, and non-streaming requests. Automatic history trimming is disabled for Responses;
+context overflow fails the agent run. Chat Completions behavior is unchanged.
 
 ## Run a review
 

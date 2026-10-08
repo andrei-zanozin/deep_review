@@ -5,7 +5,7 @@ import re
 from collections.abc import Mapping
 from decimal import Decimal
 from pathlib import Path
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 import yaml
 from pydantic import AnyHttpUrl, BaseModel, ConfigDict, Field, SecretStr, ValidationError
@@ -16,6 +16,7 @@ from deep_review.models import AgentRole
 CONFIG_FILENAME = "config.yml"
 ENVIRONMENT_REFERENCE = re.compile(r"^\$\{([A-Za-z_][A-Za-z0-9_]*)\}$")
 NonEmptyString = Annotated[str, Field(min_length=1)]
+LlmApi = Literal["chat_completions", "responses"]
 
 
 class StrictConfigurationModel(BaseModel):
@@ -55,10 +56,13 @@ class LlmConfig(StrictConfigurationModel):
     base_url: AnyHttpUrl
     api_key: SecretStr | None = None
     model_id: NonEmptyString
+    api: LlmApi = "chat_completions"
     parameters: dict[str, Any] = Field(default_factory=lambda: {"temperature": 0})
     pricing: TokenPricing | None = None
 
     def model_post_init(self, __context: Any) -> None:
+        if self.api == "responses" and "parameters" not in self.model_fields_set:
+            self.parameters = {}
         if self.api_key is not None and not self.api_key.get_secret_value().strip():
             raise ValueError("LLM API key must not be blank")
 
@@ -67,11 +71,12 @@ class AgentLlmConfig(StrictConfigurationModel):
     base_url: AnyHttpUrl | None = None
     api_key: SecretStr | None = None
     model_id: NonEmptyString | None = None
+    api: LlmApi | None = None
     parameters: dict[str, Any] = Field(default_factory=dict)
     pricing: TokenPricing | None = None
 
     def model_post_init(self, __context: Any) -> None:
-        for field in ("base_url", "model_id"):
+        for field in ("base_url", "model_id", "api"):
             if field in self.model_fields_set and getattr(self, field) is None:
                 raise ValueError(f"agent LLM {field} must not be null")
         if "api_key" in self.model_fields_set and self.api_key is not None:
@@ -105,14 +110,17 @@ class DeepReviewConfig(StrictConfigurationModel):
             "base_url": self.llm.base_url,
             "api_key": self.llm.api_key,
             "model_id": self.llm.model_id,
+            "api": self.llm.api,
             "parameters": dict(self.llm.parameters),
             "pricing": self.llm.pricing,
         }
         override = agent.llm
         if override is not None:
-            for field in ("base_url", "api_key", "model_id"):
+            for field in ("base_url", "api_key", "model_id", "api"):
                 if field in override.model_fields_set:
                     values[field] = getattr(override, field)
+            if values["api"] != self.llm.api:
+                values["parameters"] = {} if values["api"] == "responses" else {"temperature": 0}
             values["parameters"].update(override.parameters)
             if "pricing" in override.model_fields_set:
                 values["pricing"] = override.pricing

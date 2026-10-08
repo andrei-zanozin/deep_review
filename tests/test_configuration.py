@@ -262,3 +262,45 @@ def test_rejects_negative_pricing_rate(tmp_path: Path) -> None:
     )
     with pytest.raises(ConfigurationError, match="greater than or equal to 0"):
         load_config(write_config(tmp_path, source), {"JIRA_PAT": "jira", "LLM_KEY": "key"})
+
+
+def test_api_defaults_and_parameters_do_not_cross_api_boundaries(tmp_path: Path) -> None:
+    source = (
+        BASE_CONFIG
+        + """
+agents:
+  architecture_expert:
+    llm:
+      api: responses
+      parameters:
+        reasoning: {effort: high}
+  implementation_expert:
+    llm:
+      api: responses
+"""
+    )
+    config = load_config(write_config(tmp_path, source), {"JIRA_PAT": "jira", "LLM_KEY": "key"})
+    assert config.resolve(AgentRole.DISCOVERY).llm.api == "chat_completions"
+    assert config.resolve(AgentRole.ARCHITECTURE_EXPERT).llm.parameters == {
+        "reasoning": {"effort": "high"},
+    }
+    assert config.resolve(AgentRole.IMPLEMENTATION_EXPERT).llm.parameters == {}
+
+    root = config.llm.model_dump(exclude={"parameters"})
+    root["api"] = "responses"
+    config = type(config).model_validate(
+        {
+            "mcp": config.mcp.model_dump(),
+            "llm": root,
+            "agents": {"discovery": {"llm": {"api": "chat_completions"}}},
+        }
+    )
+    assert config.llm.parameters == {}
+    assert config.resolve(AgentRole.DISCOVERY).llm.parameters == {"temperature": 0}
+
+
+@pytest.mark.parametrize("api", ["unsupported", None])
+def test_rejects_invalid_agent_api(tmp_path: Path, api: str | None) -> None:
+    source = BASE_CONFIG + f"agents:\n  discovery:\n    llm:\n      api: {api or 'null'}\n"
+    with pytest.raises(ConfigurationError, match="api"):
+        load_config(write_config(tmp_path, source), {"JIRA_PAT": "jira", "LLM_KEY": "key"})
